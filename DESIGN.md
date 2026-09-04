@@ -27,7 +27,9 @@ deliberately. Support the PCjr joystick as the primary control.
 
 **Non-goals.** No scoring system (the original has none — it counts hostages
 killed, loaded and rescued). No extra waves, enemies or mechanics. No CGA,
-EGA or VGA support. No 64 KB PCjr support. No composite-monitor tuning.
+EGA or VGA support. No 64 KB PCjr support. No composite-monitor tuning. No
+demo-mode attract loop — the titles and mission screen stay, the scripted
+playback does not (section 15).
 
 **Explicitly deferred.** Self-booting disk and cartridge builds; Tandy 1000
 compatibility (mode 8 and the SN76496 are common to both, so this stays cheap
@@ -115,8 +117,16 @@ draw into the page the CRTC is not showing, then swap both fields with a single
 that plain CGA does not have, and it is the single most important thing that
 makes this design fit in the frame budget.
 
-BIOS mode setup can also be done through `int 10h AH=05h AL=83h` with
-`BX = (cpu_page << 8) | crt_page`, which is what Flashparty's parts use.
+Both fields can also be set through BIOS, with `int 10h AH=05h AL=83h` and
+**`BH` = CRT page, `BL` = CPU page** — which is what Flashparty's parts use.
+Note the register order: an earlier draft of this section had it as
+`BX = (cpu_page << 8) | crt_page`, i.e. the other way round. `AL=80h` reads the
+pair back the same way, and `set_vid_160_100_16` in `part3/part3.asm:1113`
+reads it and then shifts `BL` into bits 3–5 — the CPU page field — which
+settles it, since that code runs on real hardware. M1 confirms it empirically
+rather than taking either source's word for it, by writing a distinct signature
+into each page, asking BIOS for a specific pairing and seeing which one appears
+in the `B800` window.
 
 ### Buffer allocation
 
@@ -146,8 +156,8 @@ screen_y = 199 - world_y                 /* Y is 1:1, bottom-relative */
 ```
 
 Apple Y coordinates are bottom-relative and span 0–191. Mode 8 gives us 200
-rows, so world Y maps to screen rows 8–199 and the top 8 rows are spare HUD
-space.
+rows, so world Y maps to screen rows 8–199 and the top 8 rows are the HUD
+band, which the play field never touches (section 15).
 
 ### World constants (verbatim from `choplifter.s:4760`)
 
@@ -320,6 +330,7 @@ slightly stout proportions:
 | Explosion | 24×12 | 13×12 | aspect-correct |
 | Hostage | 9×11 | **8×11** | widened from 5 — must read as a person |
 | HUD digit | 6×7 | **5×7** | new font, not a conversion |
+| HUD counter bubble | 43×9 | **24×8** | one row under aspect-correct — the HUD band is 8 rows |
 
 The small sprites are therefore new art rather than conversions.
 
@@ -345,8 +356,9 @@ Two hardware pages, flipped each frame, with **per-buffer dirty-rectangle
 restore**. There is no full-screen repaint and no buffer copy.
 
 The insight that makes this cheap: **a solid horizontal band is
-scroll-invariant.** Because the sky and ground are flat colour bands, scrolling
-does not change them at all. Only the parallax mountain strip, the scenery
+scroll-invariant.** Because the sky and ground are flat colour bands — a
+decision, not an accident; see section 15 — scrolling does not change them at
+all. Only the parallax mountain strip, the scenery
 sprites and the entity dirty rects need touching when the camera moves.
 
 Because each buffer is one frame stale, the dirty list is kept per buffer and
@@ -526,7 +538,8 @@ the title, Esc pauses, Ctrl-S toggles sound.
 | **Total** | **~105 KB** |
 
 Fits 128 KB with roughly 20 KB spare. The pressure point is art: the 25 jet
-rotation frames alone are substantial, which is why pre-shifting is selective.
+rotation frames are 1,220 bytes on their own — kept in full, section 15 — which
+is why pre-shifting is selective.
 If it overflows, options in order are dropping pre-shift variants, LZ4-packing
 the title and sortie banners (`common/lz4_8088.asm`) and unpacking them on
 demand, or reducing the jet rotation to fewer frames.
@@ -608,13 +621,101 @@ rendering design in section 7 changes and it is far cheaper to learn that first.
 
 ---
 
-## 15. Open questions
+## 15. Resolved decisions
 
-- Should the ground carry scroll-varying texture? It breaks the
-  scroll-invariant-band optimisation unless the pattern is aligned to the
-  scroll step. Cheapest answer is flat bands with a static highlight line.
-- Should the HUD live in the 8 spare top rows, or overlay the sky as the
-  original does?
-- Do we reproduce the original's demo-mode attract loop?
-- Is the 25-frame jet rotation worth its memory, or does a reduced set read
-  the same in motion at 19×18?
+The four questions this section used to hold open are settled. They are
+recorded here with their reasoning, and their consequences are folded into the
+sections they affect.
+
+### Ground: flat colour bands and one static highlight line
+
+No scroll-varying ground texture. The ground is a flat `rep stosw` band with a
+single static highlight row above it, and it stays byte-identical wherever the
+camera is.
+
+This is the decision that keeps section 7 honest. That frame budget rests
+entirely on the scroll-invariant band: a ground pattern that moved with the
+camera would have to be repainted across the full 80-byte width of every
+ground row on every scrolling frame, and the "total while scrolling" line
+would grow by most of a full-screen fill.
+
+Nothing real is given up, because the original has no ground texture to give
+up. `landBackground` at `choplifter.s:10987` is a four-byte pseudo-sprite,
+`$55,$2A,$55,$2A`, stretched to whatever rectangle needs erasing — the same
+alternating-pixel fill the catalogue's `dither_pct` column flags across the
+tank and cannon art, and it reads as one solid artifact colour on real Apple
+hardware rather than as pattern. Flat PCjr colour is the faithful rendering of
+it, not a simplification. Depth comes from the parallax mountain strip and the
+horizon banding instead, and both of those are already paid for.
+
+Worth noting while we are in that routine: `eraseAllSprites` restores each
+sprite's rectangle from exactly two flat pseudo-sprites, `skyBackground`
+(`$80` × 4, black) and `landBackground`. The original is already doing
+per-sprite dirty-rect restore against a flat background model, which is
+section 7's pipeline. We are not inventing that structure, we are inheriting
+it.
+
+### HUD in the 8 spare rows
+
+The HUD occupies screen rows 0–7 — the rows mode 8's 200-line frame has spare
+over the Apple's 192 — and never overlaps the play field. Section 4's mapping
+already assumes it: world Y lands on rows 8–199.
+
+The payoff is that the HUD sits outside the scrolling world and no entity can
+ever be drawn over it, so it is not part of the dirty-rect system at all. It
+is painted at sortie start and repainted only when one of the three counters
+changes: a few bytes a second instead of a few thousand a frame. It also
+avoids the one case where a static overlay would have to be tracked in both
+video pages' dirty lists.
+
+The cost is one piece of new art. `hudBackgroundBubbleSprite` is 43 × 9 px on
+the Apple, which scales to 24 × 9 — one row taller than the eight rows
+available. The counter bubbles are therefore **redrawn at 24 × 8**, not merely
+relocated. The HUD digits are new art anyway (section 6: 6 × 7 → 5 × 7), so
+this is an addition to work already scheduled for M9 rather than a new
+problem.
+
+### Titles and mission screen, but no attract loop
+
+We keep the presentation screens: the Broderbund and Dan Gorlin logos, the
+"Your Mission: Rescue Hostages" screen, the Choplifter logo and the three
+sortie banners. The art is already extracted — `titleGraphicsTable` and
+`sortieGraphicsTable` together are 1,944 bytes of the 7,773 total, a quarter
+of the whole art budget — and it is what makes the thing feel like a product
+rather than a tech demo.
+
+We drop the original's demo-mode attract loop, which plays a scripted 224
+frames out and 224 frames back. It is a poor trade: it needs a third game
+state that drives the full simulation from a canned input script, so the
+entity update path has to run correctly against a non-player input source and
+every subsystem has to be resettable mid-flight. That is real complexity in
+the most timing-sensitive part of the codebase, spent on something the player
+sees only while not playing. This is the one place the faithful-recreation
+rule is knowingly relaxed, and the reason is that an attract loop is an
+arcade-cabinet convention rather than part of how Choplifter plays.
+
+### All 25 jet rotation frames are kept
+
+The banking turn is a signature moment of the original and the one animation
+in the game with real weight to it. It also costs more than anything else: at
+1,220 bytes the 25 `jetMaster` frames are the largest single art group, half
+again the size of all 11 chopper side tilts put together (793 bytes).
+
+We keep all 25, byte-aligned only. Section 6 already excludes the jets from
+pre-shifting, so they cost 1,220 bytes rather than 2,440, and section 11
+projects roughly 20 KB spare. Revisit only if M1's measurements or the first
+real link show memory tighter than section 11 assumes; the section 14 fallback
+stands, and dropping to alternate frames would halve the group.
+
+### Still open
+
+- **How the page register gets written each frame.** A raw `out` to `0x3DF`
+  needs us to supply the addressing-mode bits in 6–7 ourselves, because the
+  port is write-only and cannot be read back to preserve what BIOS put there.
+  `int 10h AX=0583h` lets BIOS compute them and keeps its own video variables
+  consistent, at the cost of a BIOS call inside the retrace window. M1
+  implements both and switches between them at run time, so hardware decides.
+- **Where the second page comes from.** Shrinking the DOS block and claiming
+  page 6 (section 3) is the plan; if it does not hold on hardware the fallback
+  is the self-booting build in section 14. M1 walks and reports the DOS memory
+  arena so this becomes a measurement rather than an argument.
