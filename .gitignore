@@ -1,1 +1,3 @@
 lib/repos/*
+tools/out/
+__pycache__/
