@@ -291,10 +291,10 @@ tricks below stay available.
 | 7 | Light grey | Near mountains, base concrete, tank treads |
 | 6 | Brown | Ground |
 | 14 | Yellow | Ground highlight, muzzle flash, fire core |
-| 2 | Green | Chopper body (olive), hostage fatigues |
+| 2 | Green | Chopper body (olive) |
 | 10 | Light green | Chopper highlight / topside |
 | 11 | Light cyan | Canopy glass, rotor blur |
-| 15 | White | Rotor disc, highlights, HUD text |
+| 15 | White | Rotor disc, highlights, HUD text, hostages |
 | 4 | Red | Enemy tanks |
 | 5 | Magenta | Enemy jets |
 | 13 | Light magenta | Alien saucer |
@@ -678,7 +678,9 @@ reference for shape and dimension. To be built:
   runs). 11 side tilts, 5 head-on, 3 main-rotor, 4 tail-rotor; even and odd
   pixel-X copies; index 0 transparent. Coverage-OR X scale, not
   nearest-neighbour. M4/M5 scenery (mountains, barracks, base, fence, flag) is
-  the same RLE in `src/sprdata_world.c`, linked into `m4.exe` and `m5.exe`.
+  the same RLE in `src/sprdata_world.c`, linked into `m4.exe` and later
+  spikes. M6 hostages (run / wave / board, 8×11, index 15) are RLE in
+  `src/sprdata_host.c`, linked into `m6.exe`.
   Later:
   PNG sheets, generated NASM include. Flashparty's
   `lib/repos/pcjr-flashparty-2018/tools/convert_gfx_to_bios_format.py` handles
@@ -730,6 +732,14 @@ overrides; either stick; Apple paddle tables after a ±16/255 deadzone).
 Keyboard arrows are a DOSBox fallback. Sim is 20 Hz; present may be
 faster. Fire is stubbed (M7). Real-hardware stick verification is still
 the section 14 item.
+
+M6 is a **compiling increment**, not a hardware GO. `build\m6.exe` is M5
+flight plus original hostage spawn and AI (`choplifter.s` `hostageTable`:
+wave / run L/R / board, 2 px per tick, cap 16 aboard), unload at the pad
+toward `DOOR_X`, and a Killed / Aboard / Rescued count on HUD rows 0–7.
+Eight start in the field at the far barracks; only the burning house
+releases more until M7 tanks fire the rest. No Playdate rope. Fire is
+still stubbed. The F1 debug HUD stays off by default.
 
 ---
 

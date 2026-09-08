@@ -3,7 +3,8 @@
  * Choplifter! for the IBM PCjr.  M1 video spike; M2 blit_mask_m8 (even/odd
  * pre-shifted packed sprites); M3 blit_rle_m8 plus per-buffer dirty lists;
  * M4 scrolling world (camera lead, mountain parallax, scenery); M5 flight
- * (original physics, 11-step tilt, joystick).
+ * (original physics, 11-step tilt, joystick); M6 hostages (spawn, board,
+ * unload, rescue counter).
  * See DESIGN.md sections 3, 6, 7, 10, 11 and 13.
  *
  * Everything declared here is implemented in NASM under src/asm/.

@@ -1,20 +1,21 @@
 # Choplifter! for the IBM PCjr -- build file for M1 (video spike), M2
 # (chopper on screen), M3 (blit_rle + per-buffer dirty lists), M4
-# (scrolling world) and M5 (flight: physics, 11-step tilt, joystick).
+# (scrolling world), M5 (flight: physics, 11-step tilt, joystick) and
+# M6 (hostages: spawn, board, unload, rescue counter).
 #
 # For Open Watcom's wmake.  Toolchain per DESIGN.md section 12: Open Watcom
 # C/C++ V2 16-bit for logic, NASM for the primitives, wlink to put them
 # together, wmake to drive it.
 #
-#   wmake              build build\m1.exe through build\m5.exe
+#   wmake              build build\m1.exe through build\m6.exe
 #   wmake run          build, then launch DOSBox-X with a 128 KB PCjr config
 #   wmake run-dev      as above but with a roomier machine, for quick iteration
 #   wmake run-batch    128 KB PCjr, /batch /nogfx, captured to build\M1.LOG,
 #                      and DOSBox-X exits by itself
 #   wmake clean        remove build products
 #
-# Do not add a run-m2, run-m3, run-m4 or run-m5 target that launches the
-# emulator unannounced.  M2-M5 are attended visuals; compile-only until
+# Do not add a run-m2, run-m3, run-m4, run-m5 or run-m6 target that launches
+# the emulator unannounced.  M2-M6 are attended visuals; compile-only until
 # someone is watching.
 #
 # Override any tool path on the command line, e.g.
@@ -70,6 +71,7 @@ M2      = $(BUILD)\m2.exe
 M3      = $(BUILD)\m3.exe
 M4      = $(BUILD)\m4.exe
 M5      = $(BUILD)\m5.exe
+M6      = $(BUILD)\m6.exe
 
 # -0     genuine 8086/8088 code generation.  The PCjr is an 8088; anything
 #        later would assemble instructions the machine does not have.
@@ -92,8 +94,9 @@ M2OBJS  = $(BUILD)\m2.obj $(BUILD)\sprdata.obj $(BUILD)\pcjrvid.obj $(BUILD)\pri
 M3OBJS  = $(BUILD)\m3.obj $(BUILD)\sprdata_rle.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj
 M4OBJS  = $(BUILD)\m4.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj
 M5OBJS  = $(BUILD)\m5.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
+M6OBJS  = $(BUILD)\m6.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\sprdata_host.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
 
-all : $(M1) $(M2) $(M3) $(M4) $(M5) .SYMBOLIC
+all : $(M1) $(M2) $(M3) $(M4) $(M5) $(M6) .SYMBOLIC
 
 $(M1) : $(M1OBJS)
 	$(LINK) system dos name $(M1) option quiet option stack=8192 option map=$(BUILD)\m1.map file { $(M1OBJS) }
@@ -109,6 +112,9 @@ $(M4) : $(M4OBJS)
 
 $(M5) : $(M5OBJS)
 	$(LINK) system dos name $(M5) option quiet option stack=8192 option map=$(BUILD)\m5.map file { $(M5OBJS) }
+
+$(M6) : $(M6OBJS)
+	$(LINK) system dos name $(M6) option quiet option stack=8192 option map=$(BUILD)\m6.map file { $(M6OBJS) }
 
 $(BUILD)\m1.obj : $(SRC)\m1.c $(SRC)\pcjr.h
 	@if not exist $(BUILD) mkdir $(BUILD)
@@ -130,6 +136,10 @@ $(BUILD)\m5.obj : $(SRC)\m5.c $(SRC)\pcjr.h
 	@if not exist $(BUILD) mkdir $(BUILD)
 	$(CC) $(CFLAGS) -fo=$(BUILD)\m5.obj $(SRC)\m5.c
 
+$(BUILD)\m6.obj : $(SRC)\m6.c $(SRC)\pcjr.h
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\m6.obj $(SRC)\m6.c
+
 $(BUILD)\sprdata.obj : $(SRC)\sprdata.c
 	@if not exist $(BUILD) mkdir $(BUILD)
 	$(CC) $(CFLAGS) -fo=$(BUILD)\sprdata.obj $(SRC)\sprdata.c
@@ -141,6 +151,10 @@ $(BUILD)\sprdata_rle.obj : $(SRC)\sprdata_rle.c
 $(BUILD)\sprdata_world.obj : $(SRC)\sprdata_world.c
 	@if not exist $(BUILD) mkdir $(BUILD)
 	$(CC) $(CFLAGS) -fo=$(BUILD)\sprdata_world.obj $(SRC)\sprdata_world.c
+
+$(BUILD)\sprdata_host.obj : $(SRC)\sprdata_host.c
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\sprdata_host.obj $(SRC)\sprdata_host.c
 
 $(BUILD)\pztimer.obj : $(ASMDIR)\pztimer.asm
 	@if not exist $(BUILD) mkdir $(BUILD)
