@@ -105,7 +105,7 @@ static int      crt_page;               /* what the CRTC is showing right now */
 static const unsigned char m1_palette[16] = {
      0,     /*  0  black        sky top / sprite transparency key */
      1,     /*  1  blue         sky upper band */
-     2,     /*  2  green        chopper body, hostage fatigues */
+     2,     /*  2  green        chopper body (olive) */
      3,     /*  3  cyan         reserved for palette cycling */
      4,     /*  4  red          enemy tanks */
      5,     /*  5  magenta      enemy jets */
@@ -119,7 +119,7 @@ static const unsigned char m1_palette[16] = {
     12,     /* 12  light red    reserved for palette cycling */
     13,     /* 13  light magenta alien saucer */
     14,     /* 14  yellow       ground highlight, muzzle flash, fire core */
-    15      /* 15  white        rotor disc, highlights, HUD text */
+    15      /* 15  white        rotor disc, highlights, HUD text, hostages */
 };
 
 /* ------------------------------------------------------- screen composition */
