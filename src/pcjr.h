@@ -1,7 +1,10 @@
 /* pcjr.h -- PCjr video, timing and DOS-memory primitives.
  *
- * Choplifter! for the IBM PCjr, milestone M1 (video spike).
- * See DESIGN.md sections 3, 7, 11 and 13.
+ * Choplifter! for the IBM PCjr.  M1 video spike; M2 blit_mask_m8 (even/odd
+ * pre-shifted packed sprites); M3 blit_rle_m8 plus per-buffer dirty lists;
+ * M4 scrolling world (camera lead, mountain parallax, scenery); M5 flight
+ * (original physics, 11-step tilt, joystick).
+ * See DESIGN.md sections 3, 6, 7, 10, 11 and 13.
  *
  * Everything declared here is implemented in NASM under src/asm/.
  *
@@ -9,7 +12,7 @@
  * ---------
  * All routines are __cdecl, so the C-to-asm boundary is the plain stack
  * convention.  DESIGN.md section 12 plans #pragma aux register conventions for
- * the hot paths; that is a real win for M3's per-sprite blitter, but M1 times
+ * the hot paths; that is a real win for the per-sprite blitter, but M1 times
  * whole calls of 4,000-16,000 bytes, where a stack frame is under 0.1% of the
  * measurement.  Legibility wins here.
  *
@@ -107,7 +110,10 @@
  * through int 10h, where BIOS works it out for us. */
 #define PCJR_ADDR_16K      1u
 
-#define PCJR_PAGE_COUNT    8       /* eight 16 KB pages in the low 128 KB */
+#define PCJR_PAGE_COUNT    8       /* eight 16 KB pages in the low 128 KB.
+                                    * jrIDE SRAM (128 KB-736 KB) is not in
+                                    * this set and cannot be selected here. */
+#define PRODUCT_MIN_KB     640U    /* DESIGN.md: jrIDE-class ship floor */
 #define PAGE_BYTES         0x4000UL
 #define PAGE_PARAS         0x0400U             /* 16 KB expressed in paragraphs */
 #define PAGE_SEG(p)        ((unsigned)((p) * PAGE_PARAS))   /* page 6 -> 0x1800 */
@@ -170,6 +176,25 @@ void __cdecl fill_rect_m8(unsigned dseg, unsigned xbyte, unsigned y,
 void __cdecl fill_band_m8(unsigned dseg, unsigned y, unsigned rows,
                           unsigned pattern);
 
+/* Packed mode-8 masked blit (M2).  Source is row-major packed nibbles,
+ * wbytes per row, index 0 transparent.  xbyte is a byte column.  Odd pixel
+ * X is a second pre-shifted copy (leading transparent nibble) still blitted
+ * at xbyte = x_px / 2. */
+void __cdecl blit_mask_m8(unsigned dseg, unsigned xbyte, unsigned y,
+                          unsigned wbytes, unsigned rows,
+                          unsigned sseg, unsigned soff);
+
+/* Product sprite blit (M3, DESIGN.md blit_rle).  soff -> { width_px,
+ * height_px, RLE rows }.  Each row is { skip, run, data[run] }* 0x00 0x00.
+ * Opaque runs (run >= 2) are REP MOVSB; a 1-byte run is a store or a mixed
+ * nibble RMW.  xbyte is a byte column; odd pixel X is a second pre-shifted
+ * RLE copy.  Never a full-screen copy. */
+void __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
+                         unsigned sseg, unsigned soff);
+
+/* DGROUP segment.  Small-model near pointers are offsets from this. */
+unsigned __cdecl data_seg(void);
+
 /* ------------------------------------------------------------- src/asm/pztimer.asm */
 
 /* Michael Abrash's precision Zen timer, adapted from
@@ -191,6 +216,8 @@ unsigned __cdecl ztimer_overflow(void);   /* nonzero => interval exceeded ~54 ms
 
 unsigned __cdecl dos_get_psp(void);             /* int 21h AH=51h */
 unsigned __cdecl dos_first_mcb(void);           /* int 21h AH=52h, [es:bx-2] */
+void     __cdecl dos_sysvars(unsigned *seg_out, unsigned *off_out);
+                                                /* int 21h AH=52h -> ES:BX */
 unsigned __cdecl dos_mem_size_kb(void);         /* int 12h */
 void     __cdecl dos_break_off(void);           /* int 21h AX=3301h DL=0 */
 
@@ -206,5 +233,35 @@ unsigned char __cdecl peek_byte(unsigned seg, unsigned off);
 unsigned      __cdecl peek_word(unsigned seg, unsigned off);
 void          __cdecl poke_byte(unsigned seg, unsigned off, unsigned val);
 void          __cdecl poke_word(unsigned seg, unsigned off, unsigned val);
+
+/* ------------------------------------------------------------- src/asm/stick.asm */
+
+/* Paku Paku 1.6a JOYSTICK.PAS: timeout CX=$7FFF.  Must match stick.asm.
+ * Near-timeout counts (unconnected bits stuck high) are not a live stick. */
+#define STICK_TIMEOUT   0x7FFFU
+#define STICK_LIVE_MAX  (STICK_TIMEOUT - 16U)
+
+/* Port 201h, Paku joyStick1Axis (CLI, bits stay high).  IBM joystick 1:
+ * bits 0,1 X/Y.  *buttons = (~port>>4)&3 (port bits 4-5, 1 = pressed). */
+unsigned __cdecl stick_read_port(unsigned *x, unsigned *y, unsigned *buttons);
+
+/* Stick A (bits 0,1) then stick B (bits 2,3).  *buttons = (~port>>4)&15
+ * (A buttons in bits 0-1, B in 2-3, 1 = pressed).  Returns 1 if either
+ * stick has an axis inside (0, STICK_TIMEOUT). */
+unsigned __cdecl stick_read_both(unsigned *x0, unsigned *y0,
+                                 unsigned *x1, unsigned *y1,
+                                 unsigned *buttons);
+
+/* INT 15h AH=84h DX=1 for stick A; buttons still from port 201h.  Returns 1
+ * if the BIOS call succeeded (CF clear).  Override only -- PCjr BIOS does
+ * not implement AH=84h. */
+unsigned __cdecl stick_read_bios(unsigned *x, unsigned *y, unsigned *buttons);
+
+unsigned __cdecl kbd_is_down(unsigned scan);    /* INT 9/48 make/break, 0-127 */
+unsigned __cdecl kbd_held(unsigned scan);       /* kbd[] only, no pulse */
+unsigned __cdecl kbd_broke(unsigned scan);      /* break this tick, 0-127 */
+void     __cdecl kbd_clear_pulse(void);         /* drop pulse + break latches */
+void     __cdecl kbd_hook(void);
+void     __cdecl kbd_unhook(void);
 
 #endif /* PCJR_H */

@@ -84,14 +84,46 @@ _dos_first_mcb:
         ret
 
 ;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+; void __cdecl dos_sysvars(unsigned *seg_out, unsigned *off_out)
+;
+; Same int 21h AH=52h as dos_first_mcb, but returns ES:BX itself -- the DOS
+; list of lists.  M1 uses LoL+22h (DOS 3+) to walk the device chain for
+; JRCONSYS.  DS is reloaded before the stores because we write through DGROUP
+; pointers afterwards.
+;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+        global  _dos_sysvars
+_dos_sysvars:
+        push    bp
+        mov     bp,sp
+        push    si
+        push    di
+        push    ds
+        push    es
+
+        mov     ah,0x52
+        push    ds
+        int     0x21
+        pop     ds
+        mov     si,[bp+4]               ; *seg_out = ES
+        mov     [si],es
+        mov     si,[bp+6]               ; *off_out = BX
+        mov     [si],bx
+
+        pop     es
+        pop     ds
+        pop     di
+        pop     si
+        pop     bp
+        ret
+
+;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
 ; unsigned __cdecl dos_mem_size_kb(void)
 ;
 ; int 12h -- conventional memory in KB, as BIOS reports it.  On a 128 KB PCjr
 ; this should come back as 112, the 16 KB shortfall being the video page BIOS
-; kept for itself.  If it reports 128 then BIOS has not reserved a page and the
-; page-allocation picture is different; if it reports more than 128 the machine
-; has a memory sidecar and the video pages sit in the middle of the arena
-; rather than on top of it.  Either way we would rather know.
+; kept for itself.  jrIDE.html: the jrIDE BIOS sets this to 736 KB (608 KB of
+; sidecar SRAM from 128 KB to 736 KB; the system BIOS only scans to 640 KB).
+; That extra RAM is not a 3DF page.  Either way we would rather know.
 ;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
         global  _dos_mem_size_kb
 _dos_mem_size_kb:
@@ -330,3 +362,15 @@ _poke_word:
         pop     ds
         pop     bp
         ret
+
+;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+; unsigned __cdecl data_seg(void)
+;
+; Small / compact model: near pointers are offsets from DS.  Sprite data in
+; DGROUP is passed to blit_mask_m8 / blit_rle_m8 as (data_seg(), offset).
+;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+        global  _data_seg
+_data_seg:
+        mov     ax,ds
+        ret
+

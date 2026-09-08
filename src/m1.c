@@ -1,16 +1,20 @@
 /* m1.c -- Choplifter! for the IBM PCjr, milestone M1: the video spike.
  *
- * DESIGN.md section 13 makes M1 a go/no-go gate on two assumptions that the
- * whole rendering design rests on and that nobody has ever tested:
+ * DESIGN.md section 13 made M1 a go/no-go gate on two assumptions.  Hardware
+ * closed both: JrConfig /V64 at 1000h, pages 6 and 7, attended visuals
+ * judged correct, fill/copy rates recorded in DESIGN.md section 2 from
+ * J:\GAMES\CHOPLIJR\M1.LOG.  This program is still the instrument.
  *
- *   1. Two 16 KB video pages can be had under DOS on a 128 KB PCjr, so that
- *      page flipping is a single OUT and no buffer is ever copied
- *      (section 3, "Buffer allocation"; section 14's top-severity risk).
+ *   1. Two 16 KB video pages in physical 00000-1FFFF (port 0x3DF pages 0-7
+ *      only) on a jrIDE-class machine, so page flipping is a single OUT.
+ *      Sidecar RAM is not a hardware page.  The product path is JrConfig's
+ *      video window in the first 128 KB (DEVICE=JRCONFIG.SYS /V32 or /V64,
+ *      with /L on a 736 KB box).  That window is often still inside the
+ *      owner-0008 system MCB -- it is not always an MCB hole.
  *
- *   2. Memory bandwidth is roughly 680 KB/s filling and 217-290 KB/s copying
- *      (section 2).  Those figures are analytical -- derived from the
- *      six-clock bus cycle in the PCjr Technical Reference -- and section 7's
- *      entire frame budget is built on them.
+ *   2. Section 2's analysis table (~1500 / ~3500 / ~4600 ns/byte) versus
+ *      what the Zen timer measures on this machine.  Those analysis figures
+ *      matched sidecar RAM; video RAM is slower (2803 ns/byte stosw).
  *
  * So this program does exactly three things:
  *
@@ -22,18 +26,19 @@
  *     what it measured, labelled as measured.
  *
  * It does not draw a sprite, read a joystick or make a sound.  That is the
- * point of a gate.
+ * point of a gate.  M2 is the chopper viewer.
  *
  * IMPORTANT, and the reason to be careful reading the output: no number this
  * program prints is a guess.  Anything under "measured" was timed on the
- * machine it ran on.  Anything under "predicted" is quoted from DESIGN.md and
- * was never measured by anyone.  Comparing the two is the milestone.
+ * machine it ran on.  Anything under "predicted" is quoted from DESIGN.md
+ * section 2's analysis table.  Comparing the two is the milestone.
  *
  * Equally important: an emulator cannot settle question 2.  DOSBox and
  * DOSBox-X do not model the PCjr's memory contention -- the Video Gate Array
  * stealing bus cycles from the CPU is the whole reason the numbers are low --
  * so emulator timings are a smoke test that the code runs and the loops are
- * the right shape, nothing more.  Only real hardware answers it.
+ * the right shape, nothing more.  Only a real PCjr is hardware.  Do not treat
+ * build\M1.LOG from DOSBox-X as J:\GAMES\CHOPLIJR\M1.LOG.
  */
 
 #include <stdio.h>
@@ -133,10 +138,18 @@ typedef struct {
     unsigned psp;
     unsigned block_seg;
     unsigned block_paras;
+    unsigned first_mcb;                 /* head of the MCB chain */
     unsigned arena_top;                 /* first paragraph past the last MCB */
     unsigned owned_mask;                /* pages wholly inside our allocation */
     unsigned bios_mask;                 /* pages above the arena: BIOS's video
                                          *  reserve, and therefore ours to use */
+    unsigned hole_mask;                 /* pages in 0-7 that no MCB covers */
+    unsigned jr_mask;                   /* pages inside JrConfig's /V window */
+    unsigned jr_seg;                    /* video buffer segment, 0 if unknown */
+    unsigned jr_paras;                  /* window length in paragraphs */
+    unsigned jr_kb;                     /* /V size in KB, 0 if unknown */
+    int      jr_found;                  /* JRCONSYS device header located */
+    int      jr_sig;                    /* 5AA5h present at 2000:0200 */
     int      mcb_ok;
 } mem_report;
 
@@ -187,6 +200,25 @@ static bench_result results[K_COUNT];
 /* ==========================================================================
  * Small helpers
  * ========================================================================== */
+
+/* JrConfig 3.10 (lib/repos/jrIDE/JRCONFIG.SYS, JRCONFIG.DOC).  The resident
+ * character device is named JRCONSYS.  Offsets are from that header:
+ *   +72h  word  video start paragraph (computed at init; /S moves it)
+ *   +74h  word  video size in paragraphs
+ *   +76h  byte  starting 16 KB page (start_seg >> 10)
+ *   +77h  byte  /V size in KB (default 16, range 5-96)
+ * First-boot signature: word 5AA5h at 2000:0200, written before the reboot.
+ * Without /S the buffer sits at the top of the first 128 KB:
+ *   /V16 -> 1C00h (page 7), /V32 -> 1800h (6-7), /V64 -> 1000h (4-7). */
+#define JR_DEV_NAME     "JRCONSYS"
+#define JR_NUL_NAME     "NUL     "
+#define JR_OFF_START    0x72U
+#define JR_OFF_PARAS    0x74U
+#define JR_OFF_PAGE     0x76U
+#define JR_OFF_KB       0x77U
+#define JR_SIG_SEG      0x2000U
+#define JR_SIG_OFF      0x0200U
+#define JR_SIG_WORD     0x5AA5U
 
 static unsigned long ticks_to_us(unsigned ticks)
 {
@@ -248,8 +280,9 @@ static void walk_mcbs(void)
 
     mem.mcb_ok    = 0;
     mem.arena_top = 0;
+    mem.first_mcb = dos_first_mcb();
 
-    m = dos_first_mcb();
+    m = mem.first_mcb;
 
     printf("  DOS memory arena (int 21h AH=52h chain):\n");
     printf("    MCB    owner   paragraphs      bytes  physical span\n");
@@ -285,6 +318,230 @@ static void walk_mcbs(void)
         m = (unsigned)(m + 1 + size);
     }
     printf("    (more than 64 blocks -- giving up on the walk)\n");
+}
+
+static int name8_eq(unsigned seg, unsigned off, const char *n)
+{
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        if (peek_byte(seg, (unsigned)(off + (unsigned)i)) != (unsigned char)n[i])
+            return 0;
+    }
+    return 1;
+}
+
+static int jr_header_at(unsigned seg, unsigned off)
+{
+    unsigned attr;
+
+    attr = peek_word(seg, (unsigned)(off + 4U));
+    if ((attr & 0x8000U) == 0U)
+        return 0;
+    return name8_eq(seg, (unsigned)(off + 0x0AU), JR_DEV_NAME);
+}
+
+/* Walk the DOS device chain from NUL (LoL+22h, DOS 3+) or CON (LoL+0Ch). */
+static int jr_from_device_chain(unsigned *seg_out, unsigned *off_out)
+{
+    unsigned lol_seg, lol_off, dseg, doff, next_seg, next_off;
+    int      n;
+
+    dos_sysvars(&lol_seg, &lol_off);
+    doff = peek_word(lol_seg, (unsigned)(lol_off + 0x22U));
+    dseg = peek_word(lol_seg, (unsigned)(lol_off + 0x24U));
+    if (!name8_eq(dseg, (unsigned)(doff + 0x0AU), JR_NUL_NAME)) {
+        doff = peek_word(lol_seg, (unsigned)(lol_off + 0x0CU));
+        dseg = peek_word(lol_seg, (unsigned)(lol_off + 0x0EU));
+    }
+
+    for (n = 0; n < 64; n++) {
+        if (jr_header_at(dseg, doff)) {
+            *seg_out = dseg;
+            *off_out = doff;
+            return 1;
+        }
+        next_off = peek_word(dseg, doff);
+        next_seg = peek_word(dseg, (unsigned)(doff + 2U));
+        if (next_off == 0xFFFFU && next_seg == 0xFFFFU)
+            return 0;
+        dseg = next_seg;
+        doff = next_off;
+    }
+    return 0;
+}
+
+/* DOS 2 has no NUL pointer in the list of lists; CONFIG.SYS drivers live in
+ * MCB-owned blocks, so scan those paragraphs for a JRCONSYS header. */
+static int jr_from_mcb_scan(unsigned *seg_out, unsigned *off_out)
+{
+    unsigned      m, size, s, last;
+    unsigned char sig;
+    int           n;
+
+    if (!mem.mcb_ok || mem.first_mcb == 0U)
+        return 0;
+
+    m = mem.first_mcb;
+    for (n = 0; n < 64; n++) {
+        sig  = peek_byte(m, 0);
+        size = peek_word(m, 3);
+        if (sig != 'M' && sig != 'Z')
+            return 0;
+        s = (unsigned)(m + 1U);
+        for (last = 0; last < size; last++) {
+            if (jr_header_at((unsigned)(s + last), 0)) {
+                *seg_out = (unsigned)(s + last);
+                *off_out = 0;
+                return 1;
+            }
+        }
+        if (sig == 'Z')
+            return 0;
+        m = (unsigned)(m + 1U + size);
+    }
+    return 0;
+}
+
+static unsigned jr_round16_kb(unsigned kb)
+{
+    if (kb < 16U)
+        kb = 16U;
+    return (unsigned)((kb + 15U) & ~15U);
+}
+
+/* Fill jr_seg / jr_paras from the resident header.  Prefer the start page
+ * (+76h) and /V size (+77h): those follow /S.  A 16 KB-aligned +72h is a
+ * corroborating start.  Last resort, no /S: park the rounded size at 2000h. */
+static int jr_read_window(unsigned dseg, unsigned doff)
+{
+    unsigned kb, page, start, paras, aligned;
+
+    kb    = peek_byte(dseg, (unsigned)(doff + JR_OFF_KB));
+    page  = peek_byte(dseg, (unsigned)(doff + JR_OFF_PAGE));
+    start = peek_word(dseg, (unsigned)(doff + JR_OFF_START));
+    paras = peek_word(dseg, (unsigned)(doff + JR_OFF_PARAS));
+
+    if (kb < 5U || kb > 96U)
+        return 0;
+
+    mem.jr_kb = kb;
+    if (paras == 0U || paras > 96U * 64U)
+        paras = (unsigned)(kb * 64U);
+
+    if (page >= 1U && page <= 7U)
+        aligned = PAGE_SEG(page);
+    else if ((start & 0x03FFU) == 0U && start >= PAGE_SEG(1) && start < 0x2000U)
+        aligned = start;
+    else {
+        unsigned round_paras = (unsigned)(jr_round16_kb(kb) * 64U);
+        if (round_paras >= 0x2000U)
+            return 0;
+        aligned = (unsigned)(0x2000U - round_paras);
+        if (aligned < PAGE_SEG(1))
+            return 0;
+    }
+
+    if ((unsigned long)aligned + (unsigned long)paras > 0x2000UL)
+        paras = (unsigned)(0x2000U - aligned);
+    if (paras < PAGE_PARAS)
+        return 0;
+
+    mem.jr_seg   = aligned;
+    mem.jr_paras = paras;
+    return 1;
+}
+
+static void jr_build_mask(void)
+{
+    unsigned p, pstart, pend, end;
+
+    mem.jr_mask = 0;
+    if (mem.jr_seg == 0U || mem.jr_paras < PAGE_PARAS)
+        return;
+    end = (unsigned)(mem.jr_seg + mem.jr_paras);
+    for (p = 1; p < PCJR_PAGE_COUNT; p++) {
+        pstart = PAGE_SEG(p);
+        pend   = (unsigned)(pstart + PAGE_PARAS);
+        if (pstart >= mem.jr_seg && pend <= end)
+            mem.jr_mask |= (1U << p);
+    }
+}
+
+static void detect_jrconfig(void)
+{
+    unsigned dseg, doff;
+    int      got_hdr, got_win;
+
+    dseg    = 0;
+    doff    = 0;
+    got_hdr = 0;
+    got_win = 0;
+
+    mem.jr_found = 0;
+    mem.jr_sig   = (peek_word(JR_SIG_SEG, JR_SIG_OFF) == JR_SIG_WORD);
+    mem.jr_seg   = 0;
+    mem.jr_paras = 0;
+    mem.jr_kb    = 0;
+    mem.jr_mask  = 0;
+
+    if (jr_from_device_chain(&dseg, &doff) || jr_from_mcb_scan(&dseg, &doff)) {
+        got_hdr = 1;
+        mem.jr_found = 1;
+        got_win = jr_read_window(dseg, doff);
+    }
+
+    /* Signature says JrConfig completed its two-pass boot, but the device
+     * header was not readable.  The owner's CONFIG is /V64 without /S, which
+     * JRCONFIG.DOC places at segment 1000h (pages 4-7). */
+    if (!got_win && mem.jr_sig) {
+        mem.jr_kb    = 64U;
+        mem.jr_seg   = 0x1000U;
+        mem.jr_paras = 64U * 64U;
+        got_win      = 1;
+        printf("  JrConfig boot signature 5AA5h at 2000:0200, but JRCONSYS was\n"
+               "  not readable -- assuming no-/S /V64 at segment 1000h.\n");
+    }
+
+    if (got_win)
+        jr_build_mask();
+
+    printf("  JrConfig: ");
+    if (got_hdr) {
+        printf("JRCONSYS at %04X:%04X", dseg, doff);
+        if (mem.jr_sig)
+            printf(", boot signature 5AA5h at 2000:0200");
+        printf("\n");
+    } else if (mem.jr_sig) {
+        printf("boot signature 5AA5h at 2000:0200; JRCONSYS not in the device chain\n");
+    } else {
+        printf("not found (no JRCONSYS, no 2000:0200 signature)\n");
+    }
+
+    if (got_win) {
+        unsigned p, first, last;
+
+        first = last = 0xFFFFU;
+        for (p = 1; p < PCJR_PAGE_COUNT; p++) {
+            if ((mem.jr_mask & (1U << p)) == 0U)
+                continue;
+            if (first == 0xFFFFU)
+                first = p;
+            last = p;
+        }
+        printf("  video window %u KB at segment %04Xh (physical %05lX-%05lX)",
+               mem.jr_kb, mem.jr_seg,
+               (unsigned long)mem.jr_seg * 16UL,
+               (unsigned long)(mem.jr_seg + mem.jr_paras) * 16UL - 1UL);
+        if (first != 0xFFFFU)
+            printf(", pages %u-%u", first, last);
+        printf("\n");
+        printf("  those pages are the video buffer even when an owner-0008 MCB\n"
+               "  covers them -- they are not program RAM.\n");
+    } else if (got_hdr) {
+        printf("  JRCONSYS found, but /V size and start page did not make a\n"
+               "  window in pages 1-7.\n");
+    }
 }
 
 static void claim_memory(void)
@@ -327,12 +584,56 @@ static void claim_memory(void)
            (unsigned long)(seg + got) * 16UL - 1UL);
 }
 
+/* Does any MCB, or the pre-arena DOS/BIOS region, overlap [p0, p1)? */
+static int page_is_mcb_covered(unsigned p0, unsigned p1, unsigned *owner_out)
+{
+    unsigned      m, owner, size, b0, b1;
+    unsigned char sig;
+    int           n;
+
+    *owner_out = 0xFFFFU;
+
+    /* Bytes below the first MCB are IVT, BDA and the DOS kernel -- not a
+     * JrConfig hole. */
+    if (mem.first_mcb != 0U && p1 <= mem.first_mcb)
+        return 1;
+    if (mem.first_mcb != 0U && p0 < mem.first_mcb && p1 > mem.first_mcb) {
+        *owner_out = 8U;
+        return 1;
+    }
+
+    if (!mem.mcb_ok)
+        return 1;
+
+    m = mem.first_mcb;
+    for (n = 0; n < 64; n++) {
+        sig   = peek_byte(m, 0);
+        owner = peek_word(m, 1);
+        size  = peek_word(m, 3);
+        if (sig != 'M' && sig != 'Z')
+            return 1;
+        b0 = m;
+        b1 = (unsigned)(m + 1U + size);
+        if (p0 < b1 && p1 > b0) {
+            *owner_out = owner;
+            return 1;
+        }
+        if (sig == 'Z')
+            return 0;
+        m = (unsigned)(m + 1 + size);
+    }
+    return 1;
+}
+
 static void classify_pages(void)
 {
-    unsigned p, pstart, pend;
+    unsigned p, pstart, pend, owner;
+    unsigned entry_crt;
 
     mem.owned_mask = 0;
     mem.bios_mask  = 0;
+    mem.hole_mask  = 0;
+    entry_crt      = (orig_pages >> 8) & 7U;
 
     for (p = 0; p < PCJR_PAGE_COUNT; p++) {
         pstart = PAGE_SEG(p);
@@ -342,25 +643,58 @@ static void classify_pages(void)
             pstart >= mem.block_seg &&
             pend   <= (unsigned)(mem.block_seg + mem.block_paras)) {
             mem.owned_mask |= (1U << p);
-        } else if (mem.mcb_ok && pstart >= mem.arena_top) {
-            /* Above everything DOS knows about.  On a 128 KB machine this is
-             * the 16 KB BIOS kept for the active video page, which is exactly
-             * the memory we want to use as a video page. */
-            mem.bios_mask |= (1U << p);
+        } else if ((mem.jr_mask & (1U << p)) == 0U) {
+            /* JrConfig pages stay off owned/bios/hole: they are often still
+             * inside the owner-0008 system MCB. */
+            if (mem.mcb_ok && pstart >= mem.arena_top)
+                mem.bios_mask |= (1U << p);
+            else if (mem.mcb_ok && !page_is_mcb_covered(pstart, pend, &owner))
+                mem.hole_mask |= (1U << p);
         }
     }
 
-    printf("\n  16 KB page map:\n");
+    printf("\n  16 KB page map (port 0x3DF pages 0-7 = first 128 KB only):\n");
     printf("    page  physical         status\n");
     printf("    ----  ---------------  ----------------------------------\n");
     for (p = 0; p < PCJR_PAGE_COUNT; p++) {
-        printf("    %u     %05lX-%05lX    %s\n",
+        const char *status;
+
+        if (mem.owned_mask & (1U << p))
+            status = "ours (claimed from DOS)";
+        else if (mem.jr_mask & (1U << p))
+            status = "JrConfig video reserve";
+        else if (mem.bios_mask & (1U << p))
+            status = "above the DOS arena -- BIOS video reserve";
+        else if (mem.hole_mask & (1U << p))
+            status = "MCB hole -- video reserve";
+        else if (p == 0U)
+            status = "in use (IVT / BDA / DOS -- never a video page)";
+        else {
+            owner = 0xFFFFU;
+            page_is_mcb_covered(PAGE_SEG(p),
+                                (unsigned)(PAGE_SEG(p) + PAGE_PARAS),
+                                &owner);
+            if (owner == 0xFFFFU)
+                status = "in use by DOS, by us, or absent";
+            else {
+                /* Printed in two steps so we can show the MCB owner. */
+                status = 0;
+            }
+        }
+
+        printf("    %u     %05lX-%05lX    ",
                p,
                (unsigned long)p * PAGE_BYTES,
-               (unsigned long)(p + 1) * PAGE_BYTES - 1UL,
-               (mem.owned_mask & (1U << p)) ? "ours (claimed from DOS)" :
-               (mem.bios_mask  & (1U << p)) ? "above the DOS arena -- BIOS video reserve" :
-                                              "in use by DOS, by us, or absent");
+               (unsigned long)(p + 1) * PAGE_BYTES - 1UL);
+        if (status)
+            printf("%s", status);
+        else
+            printf("in DOS arena, MCB owner %04X", owner);
+        if (p == entry_crt)
+            printf("  [entry CRT]");
+        if (p == (orig_pages & 7U) && (orig_pages & 7U) != entry_crt)
+            printf("  [entry CPU]");
+        printf("\n");
     }
 }
 
@@ -449,11 +783,14 @@ static int probe_bios_page_order(int pa, int pb)
 static int choose_pages(void)
 {
     int      p;
-    unsigned usable = mem.owned_mask | mem.bios_mask;
+    unsigned usable = mem.owned_mask | mem.bios_mask | mem.hole_mask |
+                      mem.jr_mask;
 
     if (opt_page_a >= 0 && opt_page_b >= 0) {
-        if (opt_page_a > 7 || opt_page_b > 7 || opt_page_a == opt_page_b) {
-            printf("\n  /pa and /pb must be two different pages in 0-7.\n");
+        if (opt_page_a < 1 || opt_page_b < 1 ||
+            opt_page_a > 7 || opt_page_b > 7 || opt_page_a == opt_page_b) {
+            printf("\n  /pa and /pb must be two different pages in 1-7.\n"
+                   "  Page 0 is the IVT and BIOS data area -- never force it.\n");
             return 0;
         }
         page_a = opt_page_a;
@@ -461,16 +798,16 @@ static int choose_pages(void)
         printf("\n  pages forced from the command line: A=%d B=%d\n",
                page_a, page_b);
         if (((usable >> page_a) & 1U) == 0U || ((usable >> page_b) & 1U) == 0U)
-            printf("  one or both of those is not ours according to DOS."
-                   "  Continuing anyway,\n"
-                   "  because that is what /pa and /pb are for -- but expect"
-                   " the machine to\n"
-                   "  misbehave if something else is living there.\n");
+            printf("  one or both of those is not a reserved video page.\n"
+                   "  Continuing because that is what /pa /pb are for -- but\n"
+                   "  this can trash a resident driver or the kernel.\n"
+                   "  On jrIDE, do not use /pa as a substitute for JrConfig's\n"
+                   "  /V window (lib/repos/jrIDE/jrIDE.html).\n");
     } else {
-        /* Highest two usable pages: DESIGN.md section 3 wants pages 6 and 7,
-         * which keeps the bottom 96 KB contiguous for DOS and the program. */
+        /* Highest two usable pages in 1-7.  /V64 at 1000h yields 6 and 7;
+         * /V32 at 1800h is the same pair.  Page 0 is never a candidate. */
         page_a = page_b = -1;
-        for (p = PCJR_PAGE_COUNT - 1; p >= 0; p--) {
+        for (p = (int)PCJR_PAGE_COUNT - 1; p >= 1; p--) {
             if ((usable & (1U << p)) == 0U)
                 continue;
             if (page_b < 0)
@@ -479,17 +816,37 @@ static int choose_pages(void)
                 page_a = p;
         }
         if (page_a < 0 || page_b < 0) {
-            printf("\n  *** could not find two usable 16 KB pages. ***\n");
-            printf("  The usual causes, in order of likelihood:\n");
-            printf("   - the C run-time did not hand its slack back to DOS,\n"
-                   "     so the largest free block stops short of page 6.\n"
-                   "     Compare the 'claimed' line above with the arena top:\n"
-                   "     if our own MCB is the last block, that is the cause.\n");
-            printf("   - DOS itself is large enough that the free block starts\n"
-                   "     above page 6.  Try a smaller CONFIG.SYS.\n");
-            printf("   - the machine has less than 128 KB.\n");
-            printf("  /pa=N /pb=N will force a pair anyway, if you want to see\n"
-                   "  the rest of the run.\n");
+            printf("\n  *** could not find two usable 16 KB pages in 0-7. ***\n");
+            if (mem.mem_kb > 128U) {
+                printf("  This is the expected jrIDE-class map, not a small CONFIG.\n");
+                printf("  int 12h is %u KB -- jrIDE.html: the jrIDE BIOS sets\n"
+                       "  detected memory to 736 KB (system BIOS only scans to\n"
+                       "  640 KB).  608 KB of sidecar SRAM fills 128 KB to 736 KB.\n",
+                       mem.mem_kb);
+                printf("  Port 0x3DF can only select pages 0-7 (first 128 KB).\n"
+                       "  The free block above page 7 is not video-capable.\n");
+                if (mem.jr_found || mem.jr_sig) {
+                    printf("  JrConfig is loaded, but its /V window does not contain\n"
+                           "  two full 16 KB pages in 1-7.  /V16 is one page; /V32 or\n"
+                           "  /V64 is what mode 8 flipping needs.\n");
+                } else {
+                    printf("  jrIDE.html: use JrConfig (or similar) to move the video\n"
+                           "  buffer and reserve 32 KB or 64 KB so two pages in 0-7\n"
+                           "  are the video buffer.  DOS still sees over 640 KB.\n");
+                    printf("  M1 looks for JRCONSYS and for JrConfig's 5AA5h at\n"
+                           "  2000:0200 -- an MCB hole is not required.\n");
+                }
+                printf("  Do not /pa=/pb a DOS-occupied page -- that can trash\n"
+                       "  the kernel.  Entry CRT page is %u (live BIOS video).\n",
+                       (orig_pages >> 8) & 7U);
+            } else {
+                printf("  The usual causes on a 128 KB box (not the ship target):\n");
+                printf("   - the C run-time did not hand its slack back to DOS,\n"
+                       "     so the largest free block stops short of page 6.\n");
+                printf("   - DOS itself is large enough that the free block starts\n"
+                       "     above page 6.  Try a smaller CONFIG.SYS.\n");
+                printf("   - the machine has less than 128 KB.\n");
+            }
             return 0;
         }
         if (page_a > page_b) {
@@ -509,9 +866,21 @@ static int choose_pages(void)
 /* Carve a scratch buffer out of the low end of our claim, for the copy
  * benchmarks' source.  It must not overlap either video page, or we would be
  * measuring a video-to-video copy and calling it RAM-to-video. */
+static int page_overlaps_claim(int p)
+{
+    unsigned p0, p1, c0, c1;
+
+    if (p < 0 || mem.block_paras == 0U)
+        return 0;
+    p0 = PAGE_SEG(p);
+    p1 = (unsigned)(p0 + PAGE_PARAS);
+    c0 = mem.block_seg;
+    c1 = (unsigned)(mem.block_seg + mem.block_paras);
+    return (p0 < c1) && (p1 > c0);
+}
+
 static void carve_scratch(void)
 {
-    unsigned first_page_para;
     unsigned avail_paras;
 
     scratch_seg   = 0;
@@ -520,15 +889,21 @@ static void carve_scratch(void)
     if (mem.block_paras == 0U)
         return;
 
-    first_page_para = PAGE_SEG(page_a < page_b ? page_a : page_b);
-    if (first_page_para <= mem.block_seg)
-        return;                         /* our claim starts inside a page */
-
-    avail_paras = (unsigned)(first_page_para - mem.block_seg);
-    if (avail_paras > mem.block_paras)
-        avail_paras = mem.block_paras;  /* the page may not be inside our claim */
+    /* On jrIDE the claim is sidecar RAM above 128 KB -- it never contains a
+     * 3DF page, so the whole block is plain RAM.  On a 128 KB layout the
+     * claim may include a video page; only the run below it is scratch. */
+    if (page_overlaps_claim(page_a) || page_overlaps_claim(page_b)) {
+        unsigned first_page_para = PAGE_SEG(page_a < page_b ? page_a : page_b);
+        if (first_page_para <= mem.block_seg)
+            return;
+        avail_paras = (unsigned)(first_page_para - mem.block_seg);
+        if (avail_paras > mem.block_paras)
+            avail_paras = mem.block_paras;
+    } else {
+        avail_paras = mem.block_paras;
+    }
     if (avail_paras > PAGE_PARAS)
-        avail_paras = PAGE_PARAS;       /* 16 KB is all we need */
+        avail_paras = PAGE_PARAS;
 
     scratch_seg   = mem.block_seg;
     scratch_bytes = (unsigned)(avail_paras * 16U);
@@ -931,7 +1306,7 @@ static void usage(void)
 "  /bios        flip pages with int 10h AX=0583h instead of OUT to 0x3DF\n"
 "  /batch       never wait for a keypress (use with > to capture a log)\n"
 "  /reps=N      timed repetitions per primitive, default 8\n"
-"  /pa=N /pb=N  force the two 16 KB page numbers instead of picking them\n"
+"  /pa=N /pb=N  force two page numbers in 1-7 (unsafe if those pages hold DOS)\n"
 "  /force       run even if the BIOS model byte is not a PCjr's (unsafe)\n"
 "  /?           this\n"
 "\n"
@@ -1057,28 +1432,36 @@ int main(int argc, char **argv)
     printf("  video mode on entry .......... %u\n", orig_mode);
     printf("  page register on entry ....... CRT=%u CPU=%u\n",
            (orig_pages >> 8) & 7U, orig_pages & 7U);
+    if (mem.mem_kb < PRODUCT_MIN_KB)
+        printf("  DESIGN.md requires %u KB (jrIDE-class).  This report is %u KB;\n"
+               "  it is not the ship configuration.\n",
+               PRODUCT_MIN_KB, mem.mem_kb);
     if (mem.mem_kb == 112U)
         printf("  112 KB is what a 128 KB PCjr should report: BIOS has kept\n"
-               "  the top 16 KB for the active video page, which is the page\n"
-               "  we intend to use as one of our two buffers.\n");
+               "  the top 16 KB for the active video page.  Historical; not\n"
+               "  the 640 KB jrIDE target.\n");
     else if (mem.mem_kb == 128U)
         printf("  128 KB with nothing withheld -- BIOS has not reserved a\n"
                "  video page, so page 7 may be inside the DOS arena.\n");
     else if (mem.mem_kb > 128U)
-        printf("  more than 128 KB: this machine has a memory sidecar, so the\n"
-               "  video pages sit inside the arena rather than above it.  The\n"
-               "  128 KB case DESIGN.md targets will behave differently.\n");
+        printf("  more than 128 KB: jrIDE-class sidecar.  jrIDE.html: 608 KB of\n"
+               "  SRAM fills 128 KB to 736 KB; the jrIDE BIOS sets int 12h to\n"
+               "  736 KB.  Those extra bytes are not 3DF pages.  Two video pages\n"
+               "  must be JrConfig's /V window in 0-7.\n");
     printf("\n");
 
     walk_mcbs();
+    printf("\n");
+    detect_jrconfig();
     printf("\n");
     claim_memory();
     classify_pages();
 
     if (!choose_pages()) {
         printf("\n  NO-GO on the two-page assumption: DESIGN.md section 3\n"
-               "  cannot be satisfied on this machine as configured.  See\n"
-               "  section 14's fallbacks.\n");
+               "  needs two pages in 0-7.  On jrIDE that is JrConfig's /V\n"
+               "  window (often still inside owner 0008, not an MCB hole).\n"
+               "  See section 14's fallbacks only if that window cannot be had.\n");
         return 2;
     }
     carve_scratch();
