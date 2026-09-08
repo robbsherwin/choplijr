@@ -1,15 +1,21 @@
-# Choplifter! for the IBM PCjr -- build file for milestone M1.
+# Choplifter! for the IBM PCjr -- build file for M1 (video spike), M2
+# (chopper on screen), M3 (blit_rle + per-buffer dirty lists), M4
+# (scrolling world) and M5 (flight: physics, 11-step tilt, joystick).
 #
 # For Open Watcom's wmake.  Toolchain per DESIGN.md section 12: Open Watcom
 # C/C++ V2 16-bit for logic, NASM for the primitives, wlink to put them
 # together, wmake to drive it.
 #
-#   wmake              build build\m1.exe
+#   wmake              build build\m1.exe through build\m5.exe
 #   wmake run          build, then launch DOSBox-X with a 128 KB PCjr config
 #   wmake run-dev      as above but with a roomier machine, for quick iteration
 #   wmake run-batch    128 KB PCjr, /batch /nogfx, captured to build\M1.LOG,
 #                      and DOSBox-X exits by itself
 #   wmake clean        remove build products
+#
+# Do not add a run-m2, run-m3, run-m4 or run-m5 target that launches the
+# emulator unannounced.  M2-M5 are attended visuals; compile-only until
+# someone is watching.
 #
 # Override any tool path on the command line, e.g.
 #
@@ -59,7 +65,11 @@ SRC     = src
 ASMDIR  = src\asm
 CONF    = conf
 
-TARGET  = $(BUILD)\m1.exe
+M1      = $(BUILD)\m1.exe
+M2      = $(BUILD)\m2.exe
+M3      = $(BUILD)\m3.exe
+M4      = $(BUILD)\m4.exe
+M5      = $(BUILD)\m5.exe
 
 # -0     genuine 8086/8088 code generation.  The PCjr is an 8088; anything
 #        later would assemble instructions the machine does not have.
@@ -77,16 +87,60 @@ CFLAGS  = -0 -ms -os -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND)
 # not by running.
 AFLAGS  = -f obj
 
-OBJS    = $(BUILD)\m1.obj $(BUILD)\pztimer.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj
+M1OBJS  = $(BUILD)\m1.obj $(BUILD)\pztimer.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj
+M2OBJS  = $(BUILD)\m2.obj $(BUILD)\sprdata.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj
+M3OBJS  = $(BUILD)\m3.obj $(BUILD)\sprdata_rle.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj
+M4OBJS  = $(BUILD)\m4.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj
+M5OBJS  = $(BUILD)\m5.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
 
-all : $(TARGET) .SYMBOLIC
+all : $(M1) $(M2) $(M3) $(M4) $(M5) .SYMBOLIC
 
-$(TARGET) : $(OBJS)
-	$(LINK) system dos name $(TARGET) option quiet option stack=8192 option map=$(BUILD)\m1.map file { $(OBJS) }
+$(M1) : $(M1OBJS)
+	$(LINK) system dos name $(M1) option quiet option stack=8192 option map=$(BUILD)\m1.map file { $(M1OBJS) }
+
+$(M2) : $(M2OBJS)
+	$(LINK) system dos name $(M2) option quiet option stack=8192 option map=$(BUILD)\m2.map file { $(M2OBJS) }
+
+$(M3) : $(M3OBJS)
+	$(LINK) system dos name $(M3) option quiet option stack=8192 option map=$(BUILD)\m3.map file { $(M3OBJS) }
+
+$(M4) : $(M4OBJS)
+	$(LINK) system dos name $(M4) option quiet option stack=8192 option map=$(BUILD)\m4.map file { $(M4OBJS) }
+
+$(M5) : $(M5OBJS)
+	$(LINK) system dos name $(M5) option quiet option stack=8192 option map=$(BUILD)\m5.map file { $(M5OBJS) }
 
 $(BUILD)\m1.obj : $(SRC)\m1.c $(SRC)\pcjr.h
 	@if not exist $(BUILD) mkdir $(BUILD)
 	$(CC) $(CFLAGS) -fo=$(BUILD)\m1.obj $(SRC)\m1.c
+
+$(BUILD)\m2.obj : $(SRC)\m2.c $(SRC)\pcjr.h
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\m2.obj $(SRC)\m2.c
+
+$(BUILD)\m3.obj : $(SRC)\m3.c $(SRC)\pcjr.h
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\m3.obj $(SRC)\m3.c
+
+$(BUILD)\m4.obj : $(SRC)\m4.c $(SRC)\pcjr.h
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\m4.obj $(SRC)\m4.c
+
+$(BUILD)\m5.obj : $(SRC)\m5.c $(SRC)\pcjr.h
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\m5.obj $(SRC)\m5.c
+
+$(BUILD)\sprdata.obj : $(SRC)\sprdata.c
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\sprdata.obj $(SRC)\sprdata.c
+
+$(BUILD)\sprdata_rle.obj : $(SRC)\sprdata_rle.c
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\sprdata_rle.obj $(SRC)\sprdata_rle.c
+
+$(BUILD)\sprdata_world.obj : $(SRC)\sprdata_world.c
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\sprdata_world.obj $(SRC)\sprdata_world.c
 
 $(BUILD)\pztimer.obj : $(ASMDIR)\pztimer.asm
 	@if not exist $(BUILD) mkdir $(BUILD)
@@ -104,21 +158,29 @@ $(BUILD)\dosmem.obj : $(ASMDIR)\dosmem.asm
 	@if not exist $(BUILD) mkdir $(BUILD)
 	$(NASM) $(AFLAGS) -l $(BUILD)\dosmem.lst -o $(BUILD)\dosmem.obj $(ASMDIR)\dosmem.asm
 
-# The 128 KB config is the one that matters, because the whole question M1 asks
-# is whether two video pages fit on a 128 KB machine.  Note the caveat in
-# docs/M1.md: neither DOSBox nor DOSBox-X models PCjr memory contention, so
-# timings from here are a smoke test, not a validation.
-run : $(TARGET) .SYMBOLIC
+$(BUILD)\blit.obj : $(ASMDIR)\blit.asm
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(NASM) $(AFLAGS) -l $(BUILD)\blit.lst -o $(BUILD)\blit.obj $(ASMDIR)\blit.asm
+
+$(BUILD)\stick.obj : $(ASMDIR)\stick.asm
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(NASM) $(AFLAGS) -l $(BUILD)\stick.lst -o $(BUILD)\stick.obj $(ASMDIR)\stick.asm
+
+# Product target is jrIDE-class sidecar RAM (see DESIGN.md).  run-dev is the
+# closer smoke test.  run / run-batch still use the 128 KB configs as a
+# historical check.  Neither DOSBox nor DOSBox-X models PCjr memory
+# contention, so timings from here are a smoke test, not a validation.
+run : $(M1) .SYMBOLIC
 	$(DOSBOX) -conf $(CONF)\pcjr-128k.conf
 
-run-dev : $(TARGET) .SYMBOLIC
+run-dev : $(M1) .SYMBOLIC
 	$(DOSBOX) -conf $(CONF)\pcjr-dev.conf
 
 # Unattended capture.  /nogfx because the visual test only means anything to
 # somebody looking at it, and it breaks early only on a keypress -- left in a
 # redirected run it draws to nobody for the whole of its duration.  The config
 # ends its autoexec with `exit`, so DOSBox-X shuts down and the log is closed.
-run-batch : $(TARGET) .SYMBOLIC
+run-batch : $(M1) .SYMBOLIC
 	$(DOSBOX) -conf $(CONF)\pcjr-128k-batch.conf
 	@if exist $(BUILD)\M1.LOG type $(BUILD)\M1.LOG
 

@@ -3,14 +3,16 @@
 A native PCjr recreation of Dan Gorlin's 1982 Apple II game, built to use the
 machine's 16-colour graphics, three-voice sound chip and joysticks.
 
-**Decisions already made:** faithful recreation (not a remake); 128 KB PCjr with
-an RGB monitor; Open Watcom C for logic with NASM for hot paths; shipped as a
-DOS `.EXE`.
+**Decisions already made:** faithful recreation (not a remake); **640 KB
+minimum**, jrIDE-class PCjr with an RGB monitor; Open Watcom C for logic with
+NASM for hot paths; shipped as a DOS `.EXE`. A 128 KB stock machine is
+historical analysis, not the ship target.
 
 **Reference material** lives in `lib/repos/`:
 
 | Repo | What we take from it |
 |---|---|
+| `jrIDE` | Brutman's jrIDE spec (`jrIDE.html`): 128 KB motherboard + 608 KB SRAM = 736 KB; jrIDE BIOS sets int 12h to 736 KB; JrConfig reserves a 32 KB video buffer in the first 128 KB. |
 | `ChoplifterReverse` | Quinn Dunki's clean-room 6502 RE of the original. The authoritative design doc: tuning constants, entity model, AI states, sprite art. |
 | `jrpiano` | Our own SN76496 code, including the port `61h` routing gotcha and the INT 9 key-state hook. |
 | `pcjr-flashparty-2018` | PCjr video mode setup, palette programming during retrace, `pztimer.asm`, LZ4, raster IRQ. |
@@ -39,27 +41,73 @@ to add later, but it is not a v1.0 requirement).
 
 ## 2. Target hardware
 
-IBM PCjr, 128 KB, RGB monitor, one or two joysticks, PC-DOS 2.1 or later.
+IBM PCjr, **640 KB minimum**, RGB monitor, one or two joysticks, PC-DOS 2.1 or
+later. The 2026 machine is jrIDE-class: an IDE sidecar with 1 MB of SRAM, of
+which **608 KB fills conventional memory from 128 KB to 736 KB**
+(`lib/repos/jrIDE/jrIDE.html`, Hardware). The jrIDE BIOS **sets detected
+memory to 736 KB** because the system BIOS only scans to 640 KB (same page,
+BIOS). Their hardware reporting 736 KB via int 12h is that BIOS, not a
+misconfigure.
 
-The 128 KB requirement comes from double buffering, not from the video mode:
-mode 8 needs only 16 KB and works on a 64 KB machine, but we want two pages.
+The 640 KB floor is the amount **left for DOS programs** after a 32 KB video
+reserve: jrIDE.html says that with JrConfig and jrIDE you can boot DOS, have
+a 32 KB video buffer, and still see over 640 KB for programs. We require that
+configuration. We do **not** ship for a stock 128 KB box, and we do not ask
+anyone to pull the sidecar.
+
+Double buffering still needs two 16 KB pages. Those pages can only live in
+the **motherboard** 128 KB. jrIDE SRAM does not overlay, relocate, or become
+video RAM — see section 3.
 
 **The binding performance constraint** is memory bandwidth, not the CPU. From
 the PCjr Technical Reference: RAM reads and writes average two wait states
 because the Video Gate Array shares main memory with the processor, so a bus
 cycle takes six clocks instead of four. That leaves roughly **795,000 byte
 accesses per second** for everything — instruction fetch, game logic and
-pixels. Measured throughputs we design against:
+pixels.
 
-| Operation | Cost per byte | Throughput |
-|---|---|---|
-| `rep stosw` (fill) | ~1.5 µs | ~680 KB/s |
-| `rep movsb` (copy) | ~4.6 µs | ~217 KB/s |
-| `rep movsw` (copy) | ~3.5 µs | ~290 KB/s |
+### Analysis (six-clock bus cycle)
 
-These are analytical figures derived from the six-clock bus cycle. **Milestone
-M1 must measure them for real** with `pztimer.asm`, on hardware as well as in
-the emulator, before we commit to the frame budget in section 7.
+These figures are derived from the Technical Reference, not from a timer.
+They are **predictions**. M1's hardware run showed they describe **sidecar
+RAM** much more closely than video RAM — the Video Gate Array shares the bus
+only in the first 128 KB. jrIDE.html notes that the sidecar SRAMs do not need
+DRAM refresh; that path is not a substitute for filling a hardware page.
+
+| Operation | Cost per byte | Throughput | Per 16,000-byte screen |
+|---|---|---|---|
+| `rep stosw` (fill) | ~1500 ns | ~680 KB/s | ~23.5 ms |
+| `rep movsw` (copy) | ~3500 ns | ~290 KB/s | ~55.2 ms |
+| `rep movsb` (copy) | ~4600 ns | ~217 KB/s | ~73.7 ms |
+
+### Measured on real PCjr (M1, GO)
+
+Source: `J:\GAMES\CHOPLIJR\M1.LOG` (5,947 bytes). JrConfig
+`DEVICE=JRCONFIG.SYS /V64 /L`, 64 KB video at segment `1000h`, pages **6 and
+7**. Average of 8 runs, Zen timer, mode 8, writes to the hidden page. Owner
+judged attended visuals correct; page verification all yes. Emulator
+`build\M1.LOG` is **not** this log and is not hardware.
+
+| Operation | Bytes timed | avg µs | ns/byte | ms/screen |
+|---|---:|---:|---:|---:|
+| `rep stosw` video via `B8000` | 16,000 | 44853 | 2803 | 44.8 |
+| `rep stosw` video, direct segment | 16,000 | 44860 | 2803 | 44.8 |
+| `rep stosw` plain RAM (sidecar) | 16,000 | 23629 | 1476 | 23.6 |
+| `rep stosb` video | — | 53798 | — | — |
+| `fill_rect_m8` | 16,000 | 46965 | 2935 | 46.9 |
+| `rep movsw` RAM→video | 8,000 | 31466 | 3933 | 62.9 |
+| `rep movsb` RAM→video | 4,000 | 18060 | 4515 | 72.2 |
+| `rep movsw` video→video | 8,000 | 40409 | 5051 | 80.8 |
+| `rep movsw` RAM→RAM | 8,000 | 21138 | 2642 | 42.2 |
+
+`ns/byte` and `ms/screen` are **derived** from the timed average, as quoted.
+They add no new assumptions. `stosb` has no derived line because the log's
+byte count for that row is not quoted here.
+
+Video `stosw` is 2803 ns/byte against the 1500 ns/byte prediction. Sidecar
+`stosw` is 1476 ns/byte, which is the prediction. The analysis table was a
+sidecar-like rate applied to video. Section 7's implications are under that
+heading; emulator timings remain a smoke test only.
 
 ---
 
@@ -130,16 +178,39 @@ in the `B800` window.
 
 ### Buffer allocation
 
-We need two 16 KB pages in the low 128 KB. BIOS reserves the top 16 KB for the
-active page and reports reduced conventional memory, so we must claim a second
-16 KB-aligned block ourselves. Plan: at startup shrink our DOS memory block
-(`int 21h AH=4Ah`) and take the top two pages, giving buffer A = page 6
-(physical `0x18000`) and buffer B = page 7 (`0x1C000`). That leaves 96 KB below
-for DOS and the program.
+We need two 16 KB pages. Port `0x3DF` page fields are three bits each:
+**pages 0–7 = physical `00000`–`1FFFF` only**. That is the motherboard 128 KB.
+jrIDE SRAM starts at 128 KB and runs to 736 KB (`jrIDE.html`: 608 KB of the
+card's 1 MB SRAM). Extra RAM does **not** 3DF-map and cannot be a hardware
+video page. Copying a sidecar back-buffer into one hardware page is a
+different design with a different (copy-bound) budget; it is not the plan.
 
-**This is the highest-risk piece of the whole design** — it depends on BIOS and
-DOS behaviour that emulators may not model faithfully. M1 validates it on real
-hardware before anything is built on top.
+jrIDE itself does not reserve, relocate, or overlay video RAM. Its BIOS sets
+int 12h to 736 KB and leaves the video buffer where the system put it. On
+that map DOS occupies the first 128 KB, the large free block sits above
+page 7, and M1's old "usable = overlaps a DOS free block" test reports every
+page 0–7 in use — which is what the first hardware run showed (int 12h
+736 KB, claim at `2DF60`–`B7FFF`, CRT=CPU=4). That is not "PCjr cannot
+double-buffer". It is "this CONFIG has no free 16 KB page in 0–7".
+
+**The required fix is the one jrIDE.html already names:** a memory manager
+like **JrConfig** that moves the video buffer so DOS can use memory above
+128 KB, with a **32 KB video buffer**, and still over 640 KB for programs.
+Those 32 KB (or 64 KB with `/V64`) are two or more mode-8 pages in the first
+128 KB. JrConfig 3.10 often accounts that window **inside the owner-0008
+system MCB** rather than leaving an MCB gap. M1 finds `JRCONSYS`, reads the
+resident `/V` size and start page (which follow `/S` if the buffer moved),
+and treats whole pages in that window as the video reserve. An MCB hole and
+a classic BIOS withhold are still accepted. Page 0 is never used.
+
+Do not force DOS-occupied pages with `/pa` / `/pb`. Page 0 is IVT and BDA.
+The PCjr keyboard is NMI, so `CLI` does not make overlaying a live kernel
+safe. A game that never returns to DOS may overwrite unused low DOS after
+init; M1 returns to DOS and will not. Save/restore of pages that hold
+resident drivers is not the product path — JrConfig is.
+
+The EXE, simulation and assets live in sidecar RAM. Video front/back stay
+in the 32 KB hole.
 
 ---
 
@@ -301,12 +372,14 @@ Reproducing the stripes would look like a decoding bug.
 Index 0 is transparent. Each row is **run-length encoded**:
 
 ```
-row := { skip_bytes, run_bytes, data[run_bytes] } ... 0x00
+row := { skip_bytes, run_bytes, data[run_bytes] } ... 0x00 0x00
 ```
 
-Choplifter's sprites are mostly air, so transparent gaps cost nothing and
-opaque runs become `rep movsb`. Half-byte edges (a run starting or ending on an
-odd pixel) are handled as a masked read-modify-write on the one boundary byte.
+`skip_bytes` advances the dest (transparent). `run_bytes` of 0 with skip 0
+ends the row; trailing transparency is implicit. Choplifter's sprites are
+mostly air, so transparent gaps cost nothing and opaque runs become
+`rep movsb`. Half-byte edges (a run starting or ending on an odd pixel)
+are a 1-byte run: a masked read-modify-write on the one boundary byte.
 
 **Pre-shifting** stores two variants of each sprite, for even and for odd pixel
 X, which removes all runtime nibble shifting. This doubles the data, so it is
@@ -338,7 +411,8 @@ The small sprites are therefore new art rather than conversions.
 
 | Routine | Purpose |
 |---|---|
-| `blit_rle` | Main sprite blitter: pre-shifted, RLE rows, `rep movsb` runs, masked edges |
+| `blit_mask` | M2: packed mode-8 sprite, index 0 transparent; even/odd X via two pre-shifted copies, byte-column blit |
+| `blit_rle` | Product sprite blitter (M3): pre-shifted, RLE rows, `rep movsb` runs, masked edges |
 | `blit_opaque` | Solid rectangular art (base building interior) |
 | `fill_rect` | `rep stosw`, for background bands and dirty-rect clears |
 | `fill_band` | Full-width horizontal band, the sky and ground primitive |
@@ -390,9 +464,23 @@ frames.
 | **Total while scrolling** | | **~26 ms** |
 | **Total while static** | | **~20 ms** |
 
-That leaves comfortable headroom at the 20 Hz simulation rate chosen below,
-which is the point: these are estimates, and M1 exists to replace them with
-measurements.
+That table is **analysis**. The ~26 ms scrolling total used a sidecar-like
+fill rate (~1500 ns/byte, ~23.5 ms/screen in section 2). It is **not**
+replaced by a new invented total.
+
+**Hardware rates, quoted from M1.** A full-screen video `stosw` is **44.8 ms**;
+`fill_rect_m8` is **46.9 ms**. RAM→video `movsw` is **62.9 ms/screen**, `movsb`
+**72.2 ms**, video→video `movsw` **80.8 ms**. The 20 Hz frame is 50 ms, so a
+full-page fill or copy does not fit. Sidecar `stosw` is **23.6 ms/screen** —
+that is the neighbourhood the ~26 ms line was in, and it is the wrong RAM.
+
+The pipeline still has **no full-screen repaint and no buffer copy**. Dirty
+rects and sprite blits are a few thousand bytes, not 16,000; sky and ground
+bands are scroll-invariant and are not paid again when the camera moves.
+`fill_rect_m8` is 2935 ns/byte and RAM→video `movsb` (what `blit_rle` will
+pay) is 4515 ns/byte — those are the rates the working set is counted in.
+Multiplying them into a new "total while scrolling" is a later measurement,
+not this paragraph.
 
 ### Hardware scrolling — deliberately not used
 
@@ -515,9 +603,13 @@ through the original's acceleration tables. Ctrl-A and Ctrl-V invert the axes,
 as in the original.
 
 `int 15h AH=84h` is the portable read but slow; direct reads of port `0x201`
-with a counting loop are faster. Which we use is an M5 decision informed by
-measurement. **The PCjr's joystick interface differs from the standard PC game
-adapter and needs verifying on hardware.**
+with a counting loop are faster. **M5 default on a PCjr (model `FDh`) is
+port 201h**, using Paku Paku 1.6a’s loop (CLI, count while bits stay high,
+timeout `$7FFF`, both connectors). Original PCjr BIOS does not implement
+AH=84h. `/int15` and `/port201` are overrides. Buttons are always port
+`201h`. Analog values are scaled from the rest count to the Apple 0–255
+paddle scale, then the original nibble tables, with a **±16 deadzone
+around 128** first. Ctrl-A and Ctrl-V invert the axes, as in the original.
 
 Keyboard uses the **INT 9 hook and key-state array from `jrpiano3.asm`**, since
 BIOS `int 16h` cannot report simultaneous keys. Bindings: any key starts from
@@ -527,22 +619,26 @@ the title, Esc pauses, Ctrl-S toggles sound.
 
 ## 11. Memory budget
 
-| Region | Size |
-|---|---:|
-| DOS | ~25 KB |
-| Code (C + asm) | ~30 KB |
-| Sprite art, selectively pre-shifted | ~16 KB |
-| Working RAM (entities, hostages, dirty lists, background model) | ~2 KB |
-| Video buffer A — page 6 | 16 KB |
-| Video buffer B — page 7 | 16 KB |
-| **Total** | **~105 KB** |
+jrIDE-class, 640 KB minimum for the program after a 32 KB video reserve.
+Typical hardware is 736 KB conventional (jrIDE BIOS). jrIDE.html's remaining
+SRAM in the upper-memory holes is **not enabled yet** — we do not plan on
+UMBs.
 
-Fits 128 KB with roughly 20 KB spare. The pressure point is art: the 25 jet
-rotation frames are 1,220 bytes on their own — kept in full, section 15 — which
-is why pre-shifting is selective.
-If it overflows, options in order are dropping pre-shift variants, LZ4-packing
-the title and sortie banners (`common/lz4_8088.asm`) and unpacking them on
-demand, or reducing the jet rotation to fewer frames.
+| Region | Where | Size |
+|---|---|---:|
+| DOS + jrIDE BIOS resident | first 128 KB, minus the video hole | varies with CONFIG.SYS |
+| Code (C + asm) | sidecar | ~30 KB |
+| Sprite art (room to pre-shift more than the 128 KB plan) | sidecar | ~16–32 KB |
+| Working RAM | sidecar | ~2 KB |
+| Video buffer A | page in 0–7 (JrConfig 32 KB hole) | 16 KB |
+| Video buffer B | page in 0–7 (JrConfig 32 KB hole) | 16 KB |
+| Spare | sidecar | hundreds of KB |
+
+The 128 KB packing exercise (~105 KB used, ~20 KB spare) is historical. Art
+pressure is gone as a ship-stopper; keep selective pre-shifting because it
+is the right trade for the eye, not because we are out of RAM. If something
+overflows the *video* hole, that is a page-reserve problem (section 3), not
+an art-budget problem.
 
 ---
 
@@ -576,10 +672,18 @@ records timings that differ from DOSBox by enough to matter.
 `tools/extract_chopgfx.py` already decodes the original art and is the
 reference for shape and dimension. To be built:
 
-- `tools/build_sprites.py` — PNG sheets → mode 8 nibble data, RLE-encoded,
-  with pre-shifted variants and a generated NASM include. Flashparty's
+- `tools/build_sprites.py` — flying chopper set from CHOPGFX → packed mode-8
+  nibbles in `src/sprdata.c` (M2 `blit_mask`) and RLE rows in
+  `src/sprdata_rle.c` (M3 `blit_rle`; skip/run commands, `rep movsb` opaque
+  runs). 11 side tilts, 5 head-on, 3 main-rotor, 4 tail-rotor; even and odd
+  pixel-X copies; index 0 transparent. Coverage-OR X scale, not
+  nearest-neighbour. M4/M5 scenery (mountains, barracks, base, fence, flag) is
+  the same RLE in `src/sprdata_world.c`, linked into `m4.exe` and `m5.exe`.
+  Later:
+  PNG sheets, generated NASM include. Flashparty's
   `lib/repos/pcjr-flashparty-2018/tools/convert_gfx_to_bios_format.py` handles
-  mode 8 packing and is worth cribbing.
+  mode 8 packing and is worth cribbing. No PIL; zlib PNG write stays in
+  `extract_chopgfx.py`.
 - `tools/build_sound.py` — effect definitions → SN76496 register streams.
   Foster's `fosquesttools/sound.py` is the model.
 
@@ -590,8 +694,8 @@ reference for shape and dimension. To be built:
 | # | Milestone | Exit criteria |
 |---|---|---|
 | M0 | Toolchain | Watcom + NASM + `wmake` produce a `.EXE` that runs in DOSBox-X and on hardware |
-| M1 | **Video spike** | Mode 8, two pages flipping at retrace, palette set, `fill_rect` benchmarked with `pztimer` on real hardware. **Validates section 2 and 7 and the section 3 buffer allocation.** |
-| M2 | Asset pipeline | Chopper art authored, converted, and on screen |
+| M1 | **Video spike** | Mode 8, two pages flipping at retrace, palette set, `fill_rect` benchmarked with `pztimer` on **jrIDE-class hardware** (640 KB min, typically 736 KB). **Validates section 2 and 7 and the section 3 JrConfig 32 KB hole.** **GO** on real hardware: pages 6 and 7, visuals correct, section 2 table filled from `J:\GAMES\CHOPLIJR\M1.LOG`. |
+| M2 | Asset pipeline | Chopper art authored, converted, and on screen. `blit_mask` plus even/odd pre-shifts of the side, head-on and rotor frames; stub viewer `m2.exe`. |
 | M3 | Sprite engine | `blit_rle` plus per-buffer dirty rects; chopper moves cleanly with no flicker |
 | M4 | World | Scrolling, camera lead, mountain parallax, ground, barracks, base, fence |
 | M5 | Flight | Chopper physics, 11-step tilt state machine, joystick control |
@@ -601,9 +705,31 @@ reference for shape and dimension. To be built:
 | M9 | Presentation | HUD, title, sortie banners, difficulty progression, win and lose |
 | M10 | Polish | Hardware validation pass, optimisation, palette-effect tuning |
 
-M1 is a genuine go/no-go gate. If page flipping cannot be made to work on real
-hardware, or if fill rates come in materially below the section 2 figures, the
-rendering design in section 7 changes and it is far cheaper to learn that first.
+M1 is closed **GO**. Two pages in 0–7 work with JrConfig `/V64` at `1000h`
+(highest pair 6 and 7). Video `stosw` came in at 2803 ns/byte against the
+1500 ns/byte analysis figure, which matched sidecar RAM instead. That does
+not abandon page flipping. It confirms section 7's rule: no full-screen copy
+and no full-screen fill — a 16,000-byte video fill is 44.8 ms of a 50 ms
+frame. The 128 KB "can DOS even give us two pages on a stock machine?"
+question stays closed as a product gate: jrIDE-class RAM and JrConfig's
+video reserve.
+
+M3 is **accepted** on DOSBox and real PCjr: `blit_rle_m8` plus per-buffer
+dirty lists, even byte widths, no trail, no flicker.
+
+M4 is **accepted** on attended visual (owner): scrolling world, camera
+lead, mountain parallax, BROWN ground, scenery. Demo was slower than real
+gameplay; accepted for that milestone. No joystick (that is M5). It does
+not time dirty-rect or blit byte counts; that measurement is still the
+section 14 item.
+
+M5 is a **compiling increment**, not a hardware GO. `build\m5.exe` is the
+M4 world plus original helicopter physics, 11-step tilt, and joystick
+(port `201h` Paku loop by default on model `FDh`; `/int15` / `/port201`
+overrides; either stick; Apple paddle tables after a ±16/255 deadzone).
+Keyboard arrows are a DOSBox fallback. Sim is 20 Hz; present may be
+faster. Fire is stubbed (M7). Real-hardware stick verification is still
+the section 14 item.
 
 ---
 
@@ -611,12 +737,12 @@ rendering design in section 7 changes and it is far cheaper to learn that first.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Second video page cannot be allocated under DOS on a 128 KB machine | **High** | M1 gate. Fallbacks: single-page dirty-rect rendering with retrace-timed updates, or a self-booting build that bypasses DOS entirely. |
-| Frame budget estimates are analytical, not measured | **High** | M1 measures with `pztimer.asm` before anything depends on them. |
+| Two pages in 0–7 cannot be reserved (no JrConfig 32 KB hole, or the hole is only 16 KB) | **High** | M1 gate. First fix: JrConfig (or equivalent) as jrIDE.html specifies — 32 KB video buffer, DOS still >640 KB. Do not overlay DOS-resident pages. Fallbacks only if a hole truly cannot be had: single-page dirty-rect with retrace-timed updates, or a self-booting build that bypasses DOS. |
+| Frame budget working-set size is still analysis | **High** | Per-byte rates are measured (section 2). The ~26 ms line is not a new hardware total; M3 times real dirty-rect and blit byte counts. |
 | Emulator behaviour diverges from hardware on page registers, palette timing, sound gating | Medium | Test on hardware from M1 onward. jrpiano and Foster's TODO both document specific divergences. |
 | Art overflows the memory budget | Medium | Selective pre-shifting; LZ4 the title art; reduce jet frames. |
 | Hostages unreadable at 8×11 | Medium | Deliberately widened past aspect-correct; review as soon as M2 can display them. |
-| PCjr joystick interface differs from the PC game adapter | Low | Verify on hardware in M5; BIOS `int 15h` is the safe fallback. |
+| PCjr joystick interface differs from the PC game adapter | Low | M5 uses Paku Paku 1.6a's port 201h loop on model `FDh`; INT 15h is an override only. |
 | 20 Hz simulation rate does not match the original's feel | Low | Single-constant divider; calibrate against the original in an emulator. |
 
 ---
@@ -703,9 +829,8 @@ again the size of all 11 chopper side tilts put together (793 bytes).
 
 We keep all 25, byte-aligned only. Section 6 already excludes the jets from
 pre-shifting, so they cost 1,220 bytes rather than 2,440, and section 11
-projects roughly 20 KB spare. Revisit only if M1's measurements or the first
-real link show memory tighter than section 11 assumes; the section 14 fallback
-stands, and dropping to alternate frames would halve the group.
+projects spare sidecar RAM rather than a 20 KB squeeze. Revisit only if the
+video hole is smaller than 32 KB; the section 14 fallback stands.
 
 ### Still open
 
@@ -715,7 +840,9 @@ stands, and dropping to alternate frames would halve the group.
   `int 10h AX=0583h` lets BIOS compute them and keeps its own video variables
   consistent, at the cost of a BIOS call inside the retrace window. M1
   implements both and switches between them at run time, so hardware decides.
-- **Where the second page comes from.** Shrinking the DOS block and claiming
-  page 6 (section 3) is the plan; if it does not hold on hardware the fallback
-  is the self-booting build in section 14. M1 walks and reports the DOS memory
-  arena so this becomes a measurement rather than an argument.
+- **JrConfig's exact switches for a 32 KB hole.** jrIDE.html names JrConfig
+  and the 32 KB video buffer. `JRCONFIG.DOC`: default `/V16` at `1C00h`,
+  `/V32` at `1800h`, `/V64` at `1000h` (no `/S`; `/S` moves the buffer and
+  the resident start page follows). M1 reads `JRCONSYS` rather than assuming
+  an MCB hole. `DEVICE=JRCONFIG.SYS /V64 /L` is the line the hardware boot
+  printed as `64KB of PCjr video memory located at segment 1000h`.
