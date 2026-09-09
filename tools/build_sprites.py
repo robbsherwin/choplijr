@@ -140,17 +140,20 @@ COMBAT_BULLETS = (
 )
 
 # M9 presentation.  Even-X only, index 15 (white).  HUD digits / 24x8
-# bubbles are new art in m9.c (DESIGN.md section 6).
+# bubbles are new art in m9.c (DESIGN.md section 6).  xy_scale 1.5 is a
+# readability bump for the small title/sortie text; the Choplifter logo
+# and win/lose art stay at the aspect-correct 1.0.  Broderbund is Apple
+# 220 px, so 1.5× is clamped to the 160 px mode-8 width.
 TITLE = (
-    ("titleGraphics_00",  "title_mission"),
-    ("titleGraphics_01",  "title_logo"),
-    ("titleGraphics_02",  "title_broderbund"),
-    ("titleGraphics_03",  "title_gorlin"),
-    ("titleGraphics_04",  "title_the_end"),
-    ("titleGraphics_05",  "title_crown"),
-    ("sortieGraphics_00", "sortie_first"),
-    ("sortieGraphics_01", "sortie_second"),
-    ("sortieGraphics_02", "sortie_third"),
+    ("titleGraphics_00",  "title_mission",     1.5),
+    ("titleGraphics_01",  "title_logo",        1.0),
+    ("titleGraphics_02",  "title_broderbund",  1.5),
+    ("titleGraphics_03",  "title_gorlin",      1.5),
+    ("titleGraphics_04",  "title_the_end",     1.0),
+    ("titleGraphics_05",  "title_crown",       1.0),
+    ("sortieGraphics_00", "sortie_first",      1.5),
+    ("sortieGraphics_01", "sortie_second",     1.5),
+    ("sortieGraphics_02", "sortie_third",      1.5),
 )
 
 
@@ -177,6 +180,21 @@ def jr_width_px(apple_w, widen=True):
     return w
 
 
+def jr_title_size(apple_w, apple_h, scale):
+    """Title/sortie text: ~scale on both axes, even width, fit 160 px."""
+    w = int(apple_w * chopgfx.APPLE_TO_JR_X * scale + 0.5)
+    if w < 2:
+        w = 2
+    if w & 1:
+        w += 1
+    if w > 160:
+        w = 160
+    h = int(apple_h * scale + 0.5)
+    if h < 1:
+        h = 1
+    return w, h
+
+
 def scale_row_or(src_row, src_w, dst_w):
     """Coverage-OR X scale: a dest column is ink if any source column in its
     bin is ink. Nearest-neighbour dropped every other Apple column at 32→18."""
@@ -194,6 +212,26 @@ def scale_row_or(src_row, src_w, dst_w):
                 ink = True
                 break
         out.append(ink)
+    return out
+
+
+def scale_grid_or(ink, src_w, src_h, dst_w, dst_h):
+    """Coverage-OR scale in X and Y.  Used to fatten title/sortie text."""
+    out = []
+    for y in range(dst_h):
+        y0 = y * src_h // dst_h
+        y1 = (y + 1) * src_h // dst_h
+        if y1 <= y0:
+            y1 = y0 + 1
+        if y1 > src_h:
+            y1 = src_h
+        row = [False] * dst_w
+        for sy in range(y0, y1):
+            xr = scale_row_or(ink[sy], src_w, dst_w)
+            for x in range(dst_w):
+                if xr[x]:
+                    row[x] = True
+        out.append(row)
     return out
 
 
@@ -379,7 +417,8 @@ def c_bytes(data, indent="    "):
     return "\n".join(lines)
 
 
-def convert_one(mem, name, role, colour=0, widen=True, colour_hi=None):
+def convert_one(mem, name, role, colour=0, widen=True, colour_hi=None,
+                xy_scale=1.0):
     entry = find_entry(name)
     w, h = mem[entry["addr"]], mem[entry["addr"] + 1]
     if role == "flat":
@@ -400,8 +439,13 @@ def convert_one(mem, name, role, colour=0, widen=True, colour_hi=None):
     dither, _ink_n = chopgfx.dither_ratio(rgb_rows, w)
     if dither >= FLATTEN_DITHER:
         ink = flatten_isolated(ink)
-    dst_w = jr_width_px(w, widen=widen)
-    scaled = [scale_row_or(row, w, dst_w) for row in ink]
+    if xy_scale != 1.0:
+        dst_w, dst_h = jr_title_size(w, h, xy_scale)
+        scaled = scale_grid_or(ink, w, h, dst_w, dst_h)
+    else:
+        dst_w = jr_width_px(w, widen=widen)
+        dst_h = h
+        scaled = [scale_row_or(row, w, dst_w) for row in ink]
     if role == "rotor":
         pix = colour_rotor(scaled)
     elif colour_hi is not None:
@@ -420,11 +464,11 @@ def convert_one(mem, name, role, colour=0, widen=True, colour_hi=None):
         "pix": pix,
         "even_w": dst_w,
         "odd_w": dst_w + 2,
-        "h": h,
+        "h": dst_h,
         "even_pack": even_pack,
         "odd_pack": odd_pack,
-        "even_rle": encode_sprite_rle(dst_w, h, even_pack),
-        "odd_rle": encode_sprite_rle(dst_w + 2, h, odd_pack),
+        "even_rle": encode_sprite_rle(dst_w, dst_h, even_pack),
+        "odd_rle": encode_sprite_rle(dst_w + 2, dst_h, odd_pack),
         "flattened": dither >= FLATTEN_DITHER,
         "dither": dither,
     }
@@ -816,20 +860,26 @@ def main():
 """)
     title_b = 0
     title_n = 0
-    for name, ident in TITLE:
-        spr = convert_one(mem, name, "host", colour=IDX_BODY, widen=False)
+    for name, ident, scale in TITLE:
+        spr = convert_one(mem, name, "host", colour=IDX_BODY, widen=False,
+                          xy_scale=scale)
         extra = " even-only;"
+        if scale != 1.0:
+            extra += f" xy_scale {scale:g};"
         if spr["flattened"]:
             extra += " flattened isolated HGR pixels;"
+        or_axes = "XY" if scale != 1.0 else "X"
         title.append(
             f"/* {spr['name']}: Apple {spr['apple_w']}x{spr['apple_h']} -> "
             f"PCjr {spr['even_w']}x{spr['h']} even-only; index 15;"
-            f"{extra} coverage-OR X. */\n"
+            f"{extra} coverage-OR {or_axes}. */\n"
         )
         title.append(emit_rle_array(ident, spr["even_rle"]))
         title.append("\n")
         title_b += len(spr["even_rle"])
         title_n += 1
+        print(f"  {ident:<18} Apple {spr['apple_w']:>3}x{spr['apple_h']:<2} "
+              f"-> {spr['even_w']:>3}x{spr['h']:<2}  scale {scale:g}")
     title.append(
         "unsigned char *sortie_banner_e[3] = {\n"
         "    sortie_first, sortie_second, sortie_third\n"

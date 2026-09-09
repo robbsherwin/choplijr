@@ -288,10 +288,10 @@ tricks below stay available.
 | 1 | Blue | Sky upper band |
 | 9 | Light blue | Sky lower band, horizon haze |
 | 8 | Dark grey | Far mountain ridge (parallax layer) |
-| 7 | Light grey | Near mountains, base concrete, tank treads |
+| 7 | Light grey | Near mountains, base concrete |
 | 6 | Brown | Ground |
 | 14 | Yellow | Ground highlight, muzzle flash, fire core |
-| 2 | Green | Chopper body (olive) |
+| 2 | Green | Tank treads, turret shadow |
 | 10 | Light green | Chopper highlight / topside |
 | 11 | Light cyan | Canopy glass, rotor blur |
 | 15 | White | Rotor disc, highlights, HUD text, hostages |
@@ -330,9 +330,15 @@ the horizon scanline so the same pixel value means sky above and ground below,
 buying more than 16 simultaneous colours. It costs real CPU and is
 timing-fragile. The game must not depend on it.
 
-**No dithering.** At 160 × 200 the pixels are wide enough that a checkerboard
-reads as vertical stripes rather than a blend. Plan for flat colours with hard
-outlines.
+**Dither only the sky bands.** At 160 × 200 the pixels are wide enough that a
+checkerboard reads as vertical stripes rather than a blend, so sprites stay
+flat colours with hard outlines. The exception is the sky, where a 4 × 4
+Bayer matrix over the band fills does read as a blend: `src/m9.c` fades haze
+into dark blue and dark blue into black that way. It stays free because the
+pattern is a pure function of (x, y), so each row is still one `rep stosw` of
+a precomputed word and `restore_rect` can repaint under a sprite without
+tracking state. This has only been judged on a rendered preview, not on a
+real PCjr display.
 
 Note the corollary for section 7: colour should be spent on horizontal bands,
 which are scroll-invariant and therefore free, rather than on scroll-varying
@@ -684,8 +690,11 @@ reference for shape and dimension. To be built:
   frames even-only, saucers, bullets even/odd, explosions, burning house) is
   RLE in `src/sprdata_combat.c`, linked into `m7.exe` and later spikes.
   Title, sortie, and win/lose art is even-X RLE in `src/sprdata_title.c`,
-  linked into `m9.exe`. HUD digits and the 24×8 bubbles are new art in
-  `src/m9.c`.
+  linked into `m9.exe`. Broderbund / Gorlin / mission / sortie banners are
+  ~1.5× from the Apple bitmaps (Broderbund clamped to 160 px) as a
+  readability trial of the crushed X scale; the Choplifter logo and
+  win/lose art stay aspect-correct. HUD digits and the 24×8 bubbles are
+  new art in `src/m9.c`.
   Later:
   PNG sheets, generated NASM include. Flashparty's
   `lib/repos/pcjr-flashparty-2018/tools/convert_gfx_to_bios_format.py` handles

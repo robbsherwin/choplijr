@@ -78,7 +78,6 @@ extern unsigned char *tank_cannon_e[5];
 extern unsigned char *explosion_e[5];
 extern unsigned char *alien_e[4];
 extern unsigned char *house_fire_e[2];
-extern unsigned char *tank_tread_e[2];
 extern unsigned char  tank_turret_e[];
 extern unsigned char  house_burn_e[];
 extern unsigned char  house_debris_e[];
@@ -86,8 +85,6 @@ extern unsigned char  chop_rubble_e[];
 extern unsigned char  hostage_die_e[];
 extern unsigned char  bullet_chop_e[];
 extern unsigned char  bullet_chop_o[];
-extern unsigned char  bullet_shell_e[];
-extern unsigned char  bullet_shell_o[];
 extern unsigned char  bullet_missile_e[];
 extern unsigned char  bullet_missile_o[];
 extern unsigned char  bullet_bomb_e[];
@@ -154,6 +151,14 @@ static unsigned opt_frames      = 0;        /* 0 = until Esc */
 /* Tread bottom = LAND_POSY + GROUND - this.  8 sat them on the
  * highlight; 13 is two rows under the first "a little high" nudge. */
 #define TANK_GROUND_BIAS 13U
+/* One shell in the air at a time (Atari 8-bit feel: ~2 shots/s).  After
+ * impact the boom plays, then a beat, then the next shot.  Four shots
+ * make a volley; then 2 s at 20 Hz before another.  Apple was one shot
+ * every 8–23 ticks with no volley rest. */
+#define TANK_BURST_N        4U
+#define TANK_SHOT_BEAT      5U          /* ticks after impact; boom is 5 */
+#define TANK_BURST_COOL     40U         /* 2.0 s */
+#define TANK_SHOT_NONE      0xFFU
 #define CHOP_GROUND_INIT 22U
 #define MAX_SINK        6U
 #define SIM_DIV         3U              /* 20 Hz sim from 60 Hz retrace */
@@ -183,11 +188,21 @@ static unsigned opt_frames      = 0;        /* 0 = until Esc */
 
 #define N_SIDE          11
 #define N_HEAD          5
-#define TAIL_DX         (-7)
-#define TAIL_DY         5
+#define TAIL_DX         (-3)            /* hub on the tail boom, not past it */
+#define TAIL_DY         1               /* boom is ~row 4 of the 13-row side */
 #define ROTOR_DY        (-1)
 #define ROTOR_W         22
+/* Tank / saucer shot: 2x2 screen px.  Index 7 is light grey; 6 is the
+ * CGA brown that reads orange on a CRT (same register as the ground). */
+#define SHELL_PX        2U
+#define SHELL_WORLD_W   (SHELL_PX * 2U)
+#define SHELL_C_GREY    7
+#define SHELL_C_ORANGE  6
+#define CHOP_HIT_W      18U             /* screen px; 2 world px each */
+#define CHOP_HIT_H      18U
+#define CHOP_WORLD_W    (CHOP_HIT_W * 2U)
 #define ROTOR_HUB       11              /* pixel 11 of the 22-wide disc */
+#define ROTOR_FORWARD   3               /* nose-ward of body centre */
 
 #define APPLE_CENTER    128
 #define STICK_DEADZONE  16              /* ±16 on 0-255 ≈ 12.5% throw */
@@ -335,7 +350,15 @@ static unsigned char    viewer_quit;    /* 1 = Esc from play or logos */
 static unsigned char    crash_fx;
 static unsigned char    num_tanks, num_jets, num_aliens;
 static unsigned char    tank_ids[4], jet_ids[4], alien_ids[4];
-static unsigned char    tank_can_fire;
+/* Per entity slot; only tanks use these.  left = shells still to fire
+ * in the current volley; wait = beat after impact, or the 2 s rest;
+ * shot = live ET_SHELL index, or TANK_SHOT_NONE. */
+static unsigned char    tank_burst_left[MAX_ENT];
+static unsigned char    tank_burst_wait[MAX_ENT];
+static unsigned char    tank_burst_shot[MAX_ENT];
+/* 1 while a tank shell's dirt burst is in ordinance_check: chopper
+ * overlap is the 2x2, not Apple's ±12 world-px pad. */
+static unsigned char    shell_chop_aabb;
 static unsigned char    alien_odd;
 static unsigned char    rnd_s, rnd_seed;
 
@@ -368,9 +391,9 @@ static unsigned char    pend_a, pend_s, pend_d;
 
 static const unsigned char fence_world_y[5] = { 17, 22, 25, 27, 28 };
 
-/*  0 black, 1 blue, 2 green (tank shadow), 3 cyan (jet shadow), 4 red
- *  (fire), 5 -> light cyan (jet body), 6 ground, 7 light grey (chopper
- *  shadow, mountains, treads).  Chopper body is pixel 15 (white). */
+/*  0 black, 1 blue, 2 green (tank treads, turret shadow), 3 cyan (jet
+ *  shadow), 4 red (fire), 5 -> light cyan (jet body), 6 ground, 7 light
+ *  grey (chopper shadow, mountains).  Chopper body is pixel 15 (white). */
 static const unsigned char m4_palette[16] = {
      0, 1, 2, 3, 4, 11,
     GROUND_COLOUR,
@@ -893,12 +916,126 @@ static int choose_pages(void)
     return 1;
 }
 
+/* Ordered-dither night sky.  Black used to butt straight into the dark blue
+ * band at row 64 and the seam read as a drawn line.  A 4x4 Bayer matrix fades
+ * one into the other instead, weighted low so the top of the sky stays solid.
+ *
+ * The result is still scroll-invariant: every pixel is a function of screen
+ * (x, y) only, so restore_rect can reproduce it under a sprite and the frame
+ * budget in DESIGN.md section 7 is unchanged.
+ *
+ * y0/y1 are the first dithered row and the first solid row below it; move
+ * them to shift or widen the fade.  Ordered, not random: a restored rect has
+ * to land on the same pixels the paint did. */
+#define SKY_C_BLACK     0
+#define SKY_C_DARK      1               /* dark blue */
+#define SKY_C_HAZE      9               /* light blue, horizon glow */
+
+/* Bottom-up: 3 solid haze rows at the horizon, a fade up into dark blue,
+ * 3 solid dark rows, then a fade up into black that everything above
+ * inherits.  Only the two SOLID_ runs are flat; move any of these four to
+ * re-balance how much sky is night. */
+#define SKY_HAZE_SOLID  3U
+#define SKY_DARK_SOLID  3U
+#define SKY_HAZE_Y1     (MOUNTAIN_ROW - SKY_HAZE_SOLID)     /* 167 */
+#define SKY_HAZE_Y0     (SKY_HAZE_Y1 - 24U)                 /* 143 */
+#define SKY_DARK_Y1     (SKY_HAZE_Y0 - SKY_DARK_SOLID)      /* 140 */
+#define SKY_DARK_Y0     (SKY_DARK_Y1 - 30U)                 /* 110 */
+
+typedef struct {
+    unsigned char        y0, y1;
+    unsigned char        top, bot;
+    const unsigned char *bayer;         /* 4x4 row-major, values 0-15 */
+} sky_gradient;
+
+static const unsigned char bayer_4x4[16] = {
+     0,  8,  2, 10,
+    12,  4, 14,  6,
+     3, 11,  1,  9,
+    15,  7, 13,  5
+};
+
+#define SKY_GRAD_N      2
+
+static const sky_gradient sky_grads[SKY_GRAD_N] = {
+    { (unsigned char)SKY_DARK_Y0, (unsigned char)SKY_DARK_Y1,
+      SKY_C_BLACK, SKY_C_DARK, bayer_4x4 },
+    { (unsigned char)SKY_HAZE_Y0, (unsigned char)SKY_HAZE_Y1,
+      SKY_C_DARK,  SKY_C_HAZE, bayer_4x4 }
+};
+
+static const sky_gradient *sky_grad_find(unsigned y)
+{
+    unsigned i;
+
+    for (i = 0; i < SKY_GRAD_N; i++) {
+        if (y >= (unsigned)sky_grads[i].y0 && y < (unsigned)sky_grads[i].y1)
+            return &sky_grads[i];
+    }
+    return 0;
+}
+
+/* 0 = all top colour, 16 = all bottom colour (every Bayer cell is < 16). */
+static unsigned sky_grad_mix(const sky_gradient *g, unsigned y)
+{
+    unsigned span;
+
+    span = (unsigned)g->y1 - (unsigned)g->y0;
+    if (span == 0U || y <= (unsigned)g->y0)
+        return 0U;
+    if (y >= (unsigned)g->y1)
+        return 16U;
+    return ((y - (unsigned)g->y0) * 17U) / span;
+}
+
+static unsigned char sky_grad_byte(const sky_gradient *g, unsigned xbyte,
+                                   unsigned y)
+{
+    unsigned      mix, cell, xl;
+    unsigned char l, r;
+
+    mix  = sky_grad_mix(g, y);
+    cell = (y & 3U) << 2;
+    xl   = (xbyte << 1) & 3U;           /* 2 px per byte: 0,1 or 2,3 */
+    l = ((unsigned)g->bayer[cell + xl] < mix) ? g->bot : g->top;
+    r = ((unsigned)g->bayer[cell + ((xl + 1U) & 3U)] < mix) ? g->bot : g->top;
+    return (unsigned char)((l << 4) | (r & 0x0FU));
+}
+
+/* The 4x4 cell is exactly two bytes wide, so one word repeats across a row
+ * and the fill stays a rep stosw instead of a per-pixel loop. */
+static unsigned sky_grad_pattern(const sky_gradient *g, unsigned xbyte,
+                                 unsigned y)
+{
+    return ((unsigned)sky_grad_byte(g, xbyte + 1U, y) << 8)
+           | (unsigned)sky_grad_byte(g, xbyte, y);
+}
+
+static void sky_grad_fill(unsigned seg, const sky_gradient *g, unsigned xbyte,
+                          unsigned y, unsigned wbytes, unsigned rows)
+{
+    unsigned i;
+
+    for (i = 0; i < rows; i++)
+        fill_rect_m8(seg, xbyte, y + i, wbytes, 1U,
+                     sky_grad_pattern(g, xbyte, y + i));
+}
+
+static void draw_sky_gradient(unsigned seg, const sky_gradient *g)
+{
+    sky_grad_fill(seg, g, 0U, (unsigned)g->y0, M8_BYTES_PER_ROW,
+                  (unsigned)g->y1 - (unsigned)g->y0);
+}
+
 static void paint_world(unsigned seg)
 {
     fill_band_m8(seg, 0,                HUD_ROWS,       M8_SOLID(HUD_FIELD));
-    fill_band_m8(seg, HUD_ROWS,         56,             M8_SOLID(0));
-    fill_band_m8(seg, 64,               56,             M8_SOLID(1));
-    fill_band_m8(seg, 120,              MOUNTAIN_ROW - 120, M8_SOLID(9));
+    fill_band_m8(seg, HUD_ROWS,         SKY_DARK_Y0 - HUD_ROWS,
+                                        M8_SOLID(SKY_C_BLACK));
+    draw_sky_gradient(seg, &sky_grads[0]);
+    fill_band_m8(seg, SKY_DARK_Y1,      SKY_DARK_SOLID, M8_SOLID(SKY_C_DARK));
+    draw_sky_gradient(seg, &sky_grads[1]);
+    fill_band_m8(seg, SKY_HAZE_Y1,      SKY_HAZE_SOLID, M8_SOLID(SKY_C_HAZE));
     fill_band_m8(seg, MOUNTAIN_ROW,     4,              M8_SOLID(8));
     fill_band_m8(seg, GROUND_TOP_ROW,   1,
                                         M8_SOLID(M8_IDX_GROUND_HI));
@@ -918,7 +1055,8 @@ static void paint_world(unsigned seg)
 #define HUD_DIGIT_W     5U
 #define HUD_DIGIT_H     7U
 #define BANNER_TICKS    48U             /* ~2.4 s at 20 Hz sim */
-#define BANNER_Y        92              /* 199 - $6B; original bottom-rel */
+#define BANNER_Y        92              /* 199 - $6B; original 15-px top */
+#define BANNER_H_ORIG   15              /* Apple height before 1.5x bump */
 #define END_TICKS       32U             /* Apple FRAME_COUNT cmp #$20 */
 #define END_Y           87              /* 199 - $70 */
 #define TITLE_HOLD      90U             /* ~1.5 s at 60 Hz retrace */
@@ -1161,17 +1299,19 @@ static void draw_hud(unsigned seg, int pg)
     hud_pg_r[pg] = total_rescues;
 }
 
-/* Scroll-invariant band colour for one row.  Matches paint_world. */
+/* Scroll-invariant band colour for one row.  Matches paint_world.  Rows
+ * inside the sky gradient are not solid; restore_rect handles those before
+ * it asks. */
 static unsigned band_solid(unsigned y)
 {
     if (y < HUD_ROWS)
         return M8_SOLID(HUD_FIELD);
-    if (y < 64U)
-        return M8_SOLID(0);
-    if (y < 120U)
-        return M8_SOLID(1);
+    if (y < SKY_DARK_Y0)
+        return M8_SOLID(SKY_C_BLACK);
+    if (y < SKY_HAZE_Y0)
+        return M8_SOLID(SKY_C_DARK);
     if (y < MOUNTAIN_ROW)
-        return M8_SOLID(9);
+        return M8_SOLID(SKY_C_HAZE);
     if (y < GROUND_TOP_ROW)
         return M8_SOLID(8);
     if (y == GROUND_TOP_ROW)
@@ -1183,17 +1323,25 @@ static void plot_px(unsigned seg, unsigned x, unsigned y, unsigned char c);
 
 /* Apple renderStars / renderMoon: compiled HGR dots in the night sky, plus
  * a fixed moon.  Stars twinkle by rewriting bit patterns; here a few 1-px
- * dots in the black band (rows 8-63) dim or skip.  Not added to the dirty
- * list — restore_rect wipes them, then we redraw. */
-static const unsigned char star_x[24] = {
+ * dots in the upper sky dim or skip.  The second dozen sit in the solid
+ * black the chopper can actually reach (ceiling ~row 70–87, black to 110).
+ * Not added to the dirty list — restore_rect wipes them, then we redraw.
+ * Callers must run this after the sky gradient, or the dither paints over
+ * the stars. */
+#define N_STARS         36U
+static const unsigned char star_x[N_STARS] = {
     8, 22, 35, 48, 61, 74, 88, 97, 110, 14,
     29, 41, 55, 69, 82, 101, 115, 145, 151, 6,
-    138, 90, 52, 160 - 18
+    138, 90, 52, 160 - 18,
+    18, 40, 63, 85, 102, 124, 147, 9,
+    33, 77, 118, 153
 };
-static const unsigned char star_y[24] = {
+static const unsigned char star_y[N_STARS] = {
     12, 18, 11, 28, 15, 22, 14, 31, 19, 38,
     44, 36, 51, 42, 48, 39, 52, 33, 24, 55,
-    46, 58, 21, 16
+    46, 58, 21, 16,
+    64, 71, 67, 78, 73, 81, 69, 86,
+    92, 96, 83, 91
 };
 
 static void draw_moon(unsigned seg)
@@ -1217,17 +1365,27 @@ static void draw_moon(unsigned seg)
     }
 }
 
+static const unsigned char star_cycle[4] = { 15, 8, 0, 14 };
+
 static void draw_sky_fx(unsigned seg)
 {
     unsigned i, ph;
     unsigned char c;
 
     draw_moon(seg);
-    for (i = 0; i < 24U; i++) {
-        ph = (sim_frame + i * 5U) & 7U;
-        if (ph == 0U)
-            continue;
-        c = (ph < 3U) ? 7 : 15;
+    for (i = 0; i < N_STARS; i++) {
+        if (i & 1U) {
+            /* White, dark grey, black, yellow.  4 sim ticks per colour. */
+            ph = ((sim_frame / 4U) + i) & 3U;
+            c = star_cycle[ph];
+            if (c == 0U)
+                continue;
+        } else {
+            ph = (sim_frame + i * 5U) & 7U;
+            if (ph == 0U)
+                continue;
+            c = (ph < 3U) ? 7 : 15;
+        }
         plot_px(seg, (unsigned)star_x[i], (unsigned)star_y[i], c);
     }
 }
@@ -1254,9 +1412,20 @@ static void restore_rect(unsigned seg, const dirty_rect *d)
         y1 = M8_HEIGHT_PX;
 
     while (y < y1) {
+        const sky_gradient *g = sky_grad_find(y);
+
+        if (g != 0) {
+            run_y = (unsigned)g->y1;
+            if (run_y > y1)
+                run_y = y1;
+            sky_grad_fill(seg, g, xb, y, rw, (unsigned)(run_y - y));
+            y = run_y;
+            continue;
+        }
         solid = band_solid(y);
         run_y = y + 1U;
-        while (run_y < y1 && band_solid(run_y) == solid)
+        while (run_y < y1 && sky_grad_find(run_y) == 0
+               && band_solid(run_y) == solid)
             run_y++;
         fill_rect_m8(seg, xb, y, rw, (unsigned)(run_y - y), solid);
         y = run_y;
@@ -1342,9 +1511,17 @@ static void blit_centered(unsigned seg, unsigned char *spr, int y,
 
 static void draw_sortie_banner(unsigned seg, dirty_list *list)
 {
+    unsigned char *spr;
+    int            h, y;
+
     if (banner_left == 0U || sortie >= MAX_SORTIE)
         return;
-    blit_centered(seg, sortie_banner_e[sortie], BANNER_Y, list);
+    spr = sortie_banner_e[sortie];
+    h = (int)spr[1];
+    y = BANNER_Y + BANNER_H_ORIG / 2 - h / 2;
+    if (y < (int)HUD_ROWS)
+        y = (int)HUD_ROWS;
+    blit_centered(seg, spr, y, list);
 }
 
 static void draw_end_banner(unsigned seg, dirty_list *list)
@@ -1687,6 +1864,44 @@ static const unsigned char tank_aim_table[6] = { 0x00, 0x40, 0x70, 0x90, 0xC0, 0
 static const unsigned char shell_launch_x[5] = { 0x00, 0x06, 0x10, 0x19, 0x1F };
 static const signed char   shell_launch_vx[5] = { -12, -7, 0, 7, 12 };
 static const unsigned char shell_launch_dir[5] = { 2, 3, 4, 3, 2 };
+/* 2x2 tank shell.  Even: GG / GO.  Odd: one-nibble shift for odd X. */
+static unsigned char tank_shell_e[] = {
+    2, 2,
+    0x00, 0x01, 0x77, 0x00, 0x00,
+    0x00, 0x01, 0x76, 0x00, 0x00
+};
+static unsigned char tank_shell_o[] = {
+    4, 2,
+    0x00, 0x01, 0x07, 0x00, 0x01, 0x70, 0x00, 0x00,
+    0x00, 0x01, 0x07, 0x00, 0x01, 0x60, 0x00, 0x00
+};
+/* Dark green treads (index 2) with white studs on the rim.  Same 18x6
+ * silhouette as the Apple frames; the dots crawl when the two frames swap. */
+static unsigned char tank_tread_m9_00[] = {
+    18, 6,
+    0x01, 0x07, 0xF2, 0xF2, 0xF2, 0xF2, 0xF2, 0xF2, 0xF2, 0x00, 0x00, 0x00,
+    0x09, 0x2F, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x2F, 0x00, 0x00,
+    0x00, 0x09, 0xF2, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x00,
+    0x00, 0x00, 0x09, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x2F,
+    0x00, 0x00, 0x00, 0x09, 0xF2, 0x22, 0x22, 0x22, 0x22, 0xF2, 0x22, 0x22,
+    0x22, 0x00, 0x00, 0x00, 0x01, 0x0F, 0x00, 0x01, 0x20, 0x00, 0x03, 0x2F,
+    0x2F, 0x2F, 0x00, 0x01, 0x0F, 0x00, 0x02, 0x2F, 0x2F, 0x00, 0x01, 0x20,
+    0x00, 0x00
+};
+static unsigned char tank_tread_m9_01[] = {
+    18, 6,
+    0x00, 0x01, 0x0F, 0x00, 0x01, 0x20, 0x00, 0x03, 0x2F, 0x2F, 0x2F, 0x00,
+    0x01, 0x0F, 0x00, 0x02, 0x2F, 0x2F, 0x00, 0x01, 0x20, 0x00, 0x00, 0x00,
+    0x09, 0xF2, 0x22, 0x22, 0x22, 0x22, 0xF2, 0x22, 0x22, 0x22, 0x00, 0x00,
+    0x00, 0x09, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x2F, 0x00,
+    0x00, 0x00, 0x09, 0xF2, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+    0x00, 0x00, 0x00, 0x09, 0x2F, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+    0x2F, 0x00, 0x00, 0x01, 0x07, 0xF2, 0xF2, 0xF2, 0xF2, 0xF2, 0xF2, 0xF2,
+    0x00, 0x00
+};
+static unsigned char *tank_tread_m9[2] = {
+    tank_tread_m9_00, tank_tread_m9_01
+};
 static const unsigned char jet_climb_table[5] = { 0, 0x12, 0x0F, 0x18, 0x18 };
 /* choplifter.s $6c00 jetYVelocityTables: 4-byte {sprite_off, dx, dy, dground}.
  * VY is the record index, not a Y speed.  jetXVelocityTable: VX 0->$6c00,
@@ -2615,11 +2830,14 @@ static void init_ents(void)
 {
     int i;
 
-    for (i = 0; i < MAX_ENT; i++)
+    for (i = 0; i < MAX_ENT; i++) {
         ents[i].type = ET_FREE;
+        tank_burst_left[i] = 0;
+        tank_burst_wait[i] = 0;
+        tank_burst_shot[i] = (unsigned char)TANK_SHOT_NONE;
+    }
     num_tanks = num_jets = num_aliens = 0;
     curr_shots = 0;
-    tank_can_fire = 0;
     alien_odd = 0;
 }
 
@@ -2791,6 +3009,9 @@ plane:
             break;
     }
     e->ground = (unsigned char)plane;
+    tank_burst_left[i] = 0;
+    tank_burst_wait[i] = 0;
+    tank_burst_shot[i] = (unsigned char)TANK_SHOT_NONE;
     tank_ids[num_tanks++] = (unsigned char)i;
 }
 
@@ -2948,6 +3169,27 @@ static int dx16(unsigned a, unsigned b)
     return (int)a - (int)b;
 }
 
+/* 2x2 screen shell vs the chopper body.  X is 2 world px per screen px;
+ * Y is 1:1.  Origin of the shell is the top-left, same as the blit. */
+static int shell_overlaps_chopper(int ei, int check_y)
+{
+    entity_t *e = &ents[ei];
+    int dx, shell_top, shell_bot, chop_bot, chop_top;
+
+    dx = dx16(e->x, chop_x);
+    if (dx >= (int)CHOP_WORLD_W || dx <= -(int)SHELL_WORLD_W)
+        return 0;
+    if (!check_y)
+        return 1;
+    shell_top = (int)e->y + (int)e->ground;
+    shell_bot = shell_top - ((int)SHELL_PX - 1);
+    chop_bot = (int)chop_y;
+    chop_top = chop_bot + (int)CHOP_HIT_H - 1;
+    if (shell_bot > chop_top || shell_top < chop_bot)
+        return 0;
+    return 1;
+}
+
 static void ordinance_check(int ei)
 {
     entity_t *e = &ents[ei];
@@ -2964,11 +3206,16 @@ static void ordinance_check(int ei)
     dirt = (e->type == ET_BULLET);
     if (e->ground >= chop_ground) {
         if (!airborne) {
-            d = dx16(e->x, chop_x);
-            if (d >= 0 && d < 12)
-                chopper_hit(ei);
-            else if (d < 0 && d > -11)
-                chopper_hit(ei);
+            if (shell_chop_aabb) {
+                if (shell_overlaps_chopper(ei, 0))
+                    chopper_hit(ei);
+            } else {
+                d = dx16(e->x, chop_x);
+                if (d >= 0 && d < 12)
+                    chopper_hit(ei);
+                else if (d < 0 && d > -11)
+                    chopper_hit(ei);
+            }
         }
         for (i = 0; i < MAX_HOSTAGES; i++) {
             if (hostage_anim[i] == HST_FREE)
@@ -3159,7 +3406,7 @@ static int tank_on_screen(const entity_t *e)
     int sx, w;
 
     sx = world_to_sx(e->x);
-    w = (int)tank_tread_e[0][0];
+    w = (int)tank_tread_m9[0][0];
     if (w <= 0)
         w = 18;
     /* Cannon can stick ~12 px past the treads. */
@@ -3199,7 +3446,7 @@ static void tank_step_right(entity_t *e)
         e->x += 4U;
 }
 
-static void fire_tank_shell(int ti)
+static int fire_tank_shell(int ti)
 {
     int si;
     entity_t *t, *s;
@@ -3208,7 +3455,7 @@ static void fire_tank_shell(int ti)
 
     si = ent_alloc();
     if (si < 0)
-        return;
+        return -1;
     t = &ents[ti];
     s = &ents[si];
     ang = (unsigned char)t->dir;
@@ -3227,13 +3474,14 @@ static void fire_tank_shell(int ti)
     /* Tank shells muted: off-screen fire was jarring.  Restore later. */
     /* if (tank_on_screen(t))
         snd_play(SND_SHELL); */
+    return si;
 }
 
 static void update_tank(int i)
 {
     entity_t *e = &ents[i];
-    int dxh, scratch;
-    unsigned char ang;
+    int dxh, scratch, si;
+    unsigned char ang, live;
 
     dxh = (int)(chop_x >> 8) - (int)(e->x >> 8);
     if (dxh != 0 && dxh != -1 && (dxh < -2 || dxh > 2)) {
@@ -3244,8 +3492,10 @@ static void update_tank(int i)
     scratch = (int)(unsigned char)(chop_x - e->x);
     if (dxh != 0)
         scratch ^= 0x80;
-    tank_can_fire = 0;
     if (dying) {
+        tank_burst_left[i] = 0;
+        tank_burst_wait[i] = 0;
+        tank_burst_shot[i] = (unsigned char)TANK_SHOT_NONE;
         if ((scratch & 0x80) == 0) {
             if (e->x > 4U)
                 e->x -= 4U;
@@ -3256,12 +3506,6 @@ static void update_tank(int i)
     e->vx--;
     if (e->vx == 0) {
         e->vx = (signed char)((rnd8() & 0x0FU) + 8U);
-        ang = (unsigned char)e->dir;
-        if (ang > 4U)
-            ang = 4U;
-        if ((unsigned char)scratch >= tank_aim_table[ang] &&
-            tank_aim_table[ang + 1] >= (unsigned char)scratch)
-            tank_can_fire = 0xFF;
         if (e->vy == 0) {
             if ((rnd8() & 0x17U) == 0)
                 e->vy = (signed char)0xFC;
@@ -3297,10 +3541,38 @@ static void update_tank(int i)
     } else if (tank_aim_table[ang + 1] < (unsigned char)scratch) {
         if (ang < 4U)
             e->dir++;
-    } else
-        tank_can_fire = 0xFF;
-    if (tank_can_fire)
-        fire_tank_shell(i);
+    }
+
+    /* One shell in flight at a time: wait for impact, then a beat while
+     * the boom is on the dirt.  After four, a 2 s rest.  A volley already
+     * started finishes even if aim walks off. */
+    live = tank_burst_shot[i];
+    if (live != (unsigned char)TANK_SHOT_NONE &&
+        (unsigned)live < (unsigned)MAX_ENT &&
+        ents[live].type == ET_SHELL) {
+        /* still arcing */
+    } else if (live != (unsigned char)TANK_SHOT_NONE) {
+        tank_burst_shot[i] = (unsigned char)TANK_SHOT_NONE;
+        if (tank_burst_left[i] != 0)
+            tank_burst_wait[i] = (unsigned char)TANK_SHOT_BEAT;
+        else
+            tank_burst_wait[i] = (unsigned char)TANK_BURST_COOL;
+    } else if (tank_burst_wait[i] != 0) {
+        tank_burst_wait[i]--;
+    } else if (tank_burst_left[i] != 0) {
+        si = fire_tank_shell(i);
+        if (si >= 0) {
+            tank_burst_shot[i] = (unsigned char)si;
+            tank_burst_left[i]--;
+        }
+    } else if ((unsigned char)scratch >= tank_aim_table[ang] &&
+               tank_aim_table[ang + 1] >= (unsigned char)scratch) {
+        si = fire_tank_shell(i);
+        if (si >= 0) {
+            tank_burst_shot[i] = (unsigned char)si;
+            tank_burst_left[i] = (unsigned char)(TANK_BURST_N - 1U);
+        }
+    }
 }
 
 static void fire_jet_missiles(int ji)
@@ -3634,12 +3906,19 @@ static void update_shell(int i)
     entity_t *e = &ents[i];
 
     ent_basic_phys(i, 3);
-    if (e->y != 0 && (signed char)e->y > 0)
+    if (e->y != 0 && (signed char)e->y > 0) {
+        if (shell_overlaps_chopper(i, 1)) {
+            init_explosion(i);
+            chopper_hit(i);
+        }
         return;
+    }
     e->y = 0;
     e->ground = (unsigned char)chop_ground;
     init_explosion(i);
+    shell_chop_aabb = 1;
     ordinance_check(i);
+    shell_chop_aabb = 0;
 }
 
 static void update_missile(int i)
@@ -3755,7 +4034,7 @@ static void draw_ents(unsigned seg, dirty_list *list)
              * 5-12 is a few pixels of field depth; BIAS keeps treads in
              * the dirt under the highlight rather than on it. */
             wy = (unsigned)LAND_POSY + (unsigned)e->ground - TANK_GROUND_BIAS;
-            th = (unsigned)tank_tread_e[0][1];
+            th = (unsigned)tank_tread_m9[0][1];
             if (th == 0U)
                 th = 1U;
             if (wy + th > 0U)
@@ -3763,7 +4042,7 @@ static void draw_ents(unsigned seg, dirty_list *list)
             else
                 sy = world_to_sy(wy);
             fi = (e->x & 4U) ? 0 : 1;
-            blit_aligned(seg, sx, sy, tank_tread_e[fi], list);
+            blit_aligned(seg, sx, sy, tank_tread_m9[fi], list);
             blit_aligned(seg, sx + 4, sy - 3, tank_turret_e, list);
             fi = (int)(unsigned char)e->dir;
             if (fi > 4)
@@ -3786,7 +4065,7 @@ static void draw_ents(unsigned seg, dirty_list *list)
         } else if (e->type == ET_BULLET)
             blit_at(seg, sx, sy, bullet_chop_e, bullet_chop_o, list);
         else if (e->type == ET_SHELL)
-            blit_at(seg, sx, sy, bullet_shell_e, bullet_shell_o, list);
+            blit_at(seg, sx, sy, tank_shell_e, tank_shell_o, list);
         else if (e->type == ET_MISSILE) {
             if (e->vx < 0)
                 blit_at_flip(seg, sx, sy, bullet_missile_e, bullet_missile_o,
@@ -4533,7 +4812,8 @@ static void blit_at_flip(unsigned seg, int x_px, int y,
  * Apple renderTiltedSprite shears the 1-px main rotor with spriteTiltTable
  * (choplifter.s:1399).  The body here is already one of 11 side frames, so
  * the slope follows that silhouette (pitch 0 = high-left, 10 = high-right),
- * pivoted on the mast.  Head-on stays level: the disc faces the camera.
+ * pivoted on the cabin (body centre plus ROTOR_FORWARD toward the
+ * nose).  Head-on stays level: the disc faces the camera.
  *
  * Rotor frames (22 px): 0 left-ish bar, 1 right-ish, 2 full disc.
  */
@@ -4542,9 +4822,6 @@ static const signed char rotor_tilt_sign[11] = {
 };
 static const unsigned char rotor_tilt_period[11] = {
     3, 4, 5, 10, 13, 1, 13, 10, 5, 4, 3
-};
-static const unsigned char rotor_mast_x[11] = {
-    1, 1, 1, 11, 11, 10, 10, 10, 10, 10, 16
 };
 static const unsigned char rotor_ink0[3] = { 3, 9, 0 };
 static const unsigned char rotor_ink1[3] = { 14, 20, 22 };
@@ -4676,7 +4953,11 @@ static void draw_chopper(unsigned seg, dirty_list *list)
 
     hub_y = body_y + ROTOR_DY;
     if (side) {
-        mast = (int)rotor_mast_x[pitch];
+        /* Cabin centre, then a few pixels toward the nose so the disc
+         * sits on the fuselage rather than the tail stub. */
+        mast = bw / 2 + ROTOR_FORWARD;
+        if (mast > bw - 1)
+            mast = bw - 1;
         if (flip)
             mast = bw - 1 - mast;
         hub_x = body_x + mast;
@@ -4818,17 +5099,36 @@ static int show_one_logo(unsigned char *spr, int y)
     return wait_title_hold();
 }
 
+/* Keep the 1.0-scale midline so 1.5x title text does not jump. */
+static int title_y_keep_mid(unsigned char *spr, int old_y, int old_h)
+{
+    int h, y;
+
+    h = (int)spr[1];
+    y = old_y + old_h / 2 - h / 2;
+    if (y < (int)HUD_ROWS)
+        y = (int)HUD_ROWS;
+    if (y + h > (int)M8_HEIGHT_PX)
+        y = (int)M8_HEIGHT_PX - h;
+    return y;
+}
+
 /* Broderbund, Choplifter logo, Dan Gorlin, mission.  SPACE skips one
- * screen; Esc quits.  No attract loop (DESIGN.md section 15). */
+ * screen; Esc quits.  No attract loop (DESIGN.md section 15).  The
+ * Choplifter wordmark stays at the original Y; the other three are
+ * 1.5x Apple art recentred on their old midlines. */
 static int show_presentation(void)
 {
-    if (!show_one_logo(title_broderbund, 59))
+    if (!show_one_logo(title_broderbund,
+                       title_y_keep_mid(title_broderbund, 59, 11)))
         return 0;
     if (!show_one_logo(title_logo, 94))
         return 0;
-    if (!show_one_logo(title_gorlin, 131))
+    if (!show_one_logo(title_gorlin,
+                       title_y_keep_mid(title_gorlin, 131, 17)))
         return 0;
-    if (!show_one_logo(title_mission, 89))
+    if (!show_one_logo(title_mission,
+                       title_y_keep_mid(title_mission, 89, 27)))
         return 0;
     return 1;
 }
