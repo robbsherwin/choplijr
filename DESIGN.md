@@ -680,7 +680,9 @@ reference for shape and dimension. To be built:
   nearest-neighbour. M4/M5 scenery (mountains, barracks, base, fence, flag) is
   the same RLE in `src/sprdata_world.c`, linked into `m4.exe` and later
   spikes. M6 hostages (run / wave / board, 8×11, index 15) are RLE in
-  `src/sprdata_host.c`, linked into `m6.exe`.
+  `src/sprdata_host.c`, linked into `m6.exe`. Combat art (tanks, 25 jet
+  frames even-only, saucers, bullets even/odd, explosions, burning house) is
+  RLE in `src/sprdata_combat.c`, linked into `m7.exe`.
   Later:
   PNG sheets, generated NASM include. Flashparty's
   `lib/repos/pcjr-flashparty-2018/tools/convert_gfx_to_bios_format.py` handles
@@ -740,6 +742,12 @@ toward `DOOR_X`, and a Killed / Aboard / Rescued count on HUD rows 0–7.
 Eight start in the field at the far barracks; only the burning house
 releases more until M7 tanks fire the rest. No Playdate rope. Fire is
 still stubbed. The F1 debug HUD stays off by default.
+
+M7 is a **compiling increment**, not a hardware GO. `build\m7.exe` is M6
+hostages plus tanks, jets, saucers, chopper bullets, collisions, barracks
+fires, the type 1/2 explosion and sink cycle, and three sorties. Fire is
+no longer a stub. Sound is still M8. Sortie banners and win/lose art are
+M9. The F1 debug HUD stays off by default.
 
 ---
 

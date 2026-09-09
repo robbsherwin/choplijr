@@ -28,6 +28,7 @@ port (same sim, crank-driven rope, 1-bit presentation) is specified in
 | `docs/M4.md` | milestone M4: scrolling world, camera lead, scenery |
 | `docs/M5.md` | milestone M5: flight, 11-step tilt, joystick |
 | `docs/M6.md` | milestone M6: hostages, boarding, rescue counter |
+| `docs/M7.md` | milestone M7: tanks, jets, saucers, bullets, death/sortie |
 | `src/` | C driver and the NASM primitives |
 | `makefile`, `build.bat` | the build; `wmake` is the real one, the batch file is for when it misbehaves |
 | `conf/` | DOSBox-X configurations, `machine=pcjr` |
@@ -42,22 +43,21 @@ hardware. Paths for this machine are in `setenv.bat` / `setenv.ps1`. See
 and what the numbers do and do not prove.
 
 ```
-wmake            build build\m1.exe through build\m6.exe
+wmake            build build\m1.exe through build\m7.exe
 wmake run        launch M1 in DOSBox-X as a 128 KB PCjr (attended; do not start this until someone is watching)
 wmake run-batch  128 KB, /batch /nogfx, captured to build\M1.LOG
 wmake clean
 ```
 
-M2 through M6 are compile-only visuals until someone is watching. `build\m2.exe`
+M2 through M7 are compile-only visuals until someone is watching. `build\m2.exe`
 is packed `blit_mask` of the flying set. `build\m3.exe` is the sprite engine:
 `blit_rle` plus per-buffer dirty lists, same bounce and pose cycle. `build\m4.exe`
 is the scrolling world (camera lead, mountains, barracks, base, fence).
 `build\m5.exe` is flight: original physics, 11-step tilt, joystick (arrows as
 a DOSBox fallback). `build\m6.exe` is hostages: spawn, land-and-board (cap 16),
-unload at the pad, K/A/R HUD. Do not launch DOSBox for these without an
-attended visual pass. See [docs/M1.md](docs/M1.md), [docs/M3.md](docs/M3.md),
-[docs/M4.md](docs/M4.md), [docs/M5.md](docs/M5.md) and
-[docs/M6.md](docs/M6.md).
+unload at the pad, K/A/R HUD. `build\m7.exe` is combat: tanks, jets, saucers,
+bullets, house fires, explosion/sink, three sorties. Do not launch DOSBox for these without an
+attended visual pass. See `docs/M1.md` through `docs/M7.md`.
 
 ## Progress
 
@@ -76,7 +76,8 @@ hardware. See `docs/M1.md`.
 | M4 World | **accepted** (attended visual) — scrolling playfield, camera lead, mountain parallax, barracks/base/fence, viewer `build\m4.exe`. Owner noted the demo is slower than real gameplay; accepted for M4. |
 | M5 Flight | **compiling increment** — original physics, 11-step tilt, joystick (INT 15h / port 201h), viewer `build\m5.exe`. Keyboard arrows for DOSBox. Hardware stick still to verify. |
 | M6 Hostages | **compiling increment** — spawn / wave-run / board 16 / unload at pad / K·A·R HUD, viewer `build\m6.exe`. Intact barracks wait for M7 tanks. Attended visual pending. |
-| M7 onwards | not started |
+| M7 Combat | **compiling increment** — tanks / jets / saucers / bullets / house fire / explosion-sink / three sorties, viewer `build\m7.exe`. Attended visual pending. |
+| M8 onwards | not started |
 
 Section 2's ~1500 / ~3500 / ~4600 ns/byte lines are still analysis. The
 measured video `stosw` is 2803 ns/byte (44.8 ms/screen). Do not treat an
