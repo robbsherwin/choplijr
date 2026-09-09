@@ -5,7 +5,7 @@
  *
  * Running (4), waving (3), boarding (2).  Even/odd pre-shifts.
  * Index 0 transparent, 15 white.  Widened to 8x11 (DESIGN.md
- * section 6).  Linked only into m6.exe.
+ * section 6).  Linked only into m6.exe and m7.exe.
  */
 /* hostageRunning_00: Apple 9x11 -> PCjr 8x11 even / 10x11 odd; index 15; coverage-OR X, widened.
  *   .....=..
