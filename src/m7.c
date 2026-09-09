@@ -166,6 +166,7 @@ static unsigned opt_frames      = 0;        /* 0 = until Esc */
 #define MAX_SORTIE      3
 #define HST_FREE        0xFF
 #define HST_DIE         0x40            /* crush flash; choplifter.s $40 */
+#define CRUSH_TICKS     2U              /* die sprite + blood, then free */
 #define HOSTAGE_WORLD_Y (CHOP_GROUND_INIT + 0x0BU)
 #define BASE_X_H        0x12
 #define DOOR_X_H        0x12
@@ -2457,11 +2458,12 @@ static void kill_hostage(int i)
         hostages_active--;
 }
 
-/* Landed on them.  Original killHostage blits $a092 once then frees;
- * we hold HST_DIE until the next tick so draw_hostages sees it. */
+/* Landed on them.  Original killHostage blits $a092 once then frees.
+ * Hold a couple of ticks so the red pixels on the corpse can register. */
 static void crush_hostage(int i)
 {
     hostage_act[i] = HST_DIE;
+    hostage_anim[i] = (unsigned char)CRUSH_TICKS;
     if (hostages_killed < 255U)
         hostages_killed++;
     if (hostages_active != 0U)
@@ -3729,7 +3731,10 @@ static void update_one_hostage(int i)
     if (hostage_anim[i] == HST_FREE)
         return;
     if (hostage_act[i] == HST_DIE) {
-        hostage_anim[i] = HST_FREE;
+        if (hostage_anim[i] <= 1U)
+            hostage_anim[i] = HST_FREE;
+        else
+            hostage_anim[i]--;
         return;
     }
 
@@ -4316,6 +4321,23 @@ static unsigned wave_sprite(unsigned char anim)
     return y;
 }
 
+/* Six red pixels on the lower 6x11 die sprite (palette index 4). */
+static void draw_crush_blood(unsigned seg, int sx, int sy)
+{
+    static const unsigned char ox[6] = { 2, 3, 1, 4, 2, 5 };
+    static const unsigned char oy[6] = { 7, 8, 9, 9, 10, 8 };
+    unsigned i;
+    int      x, y;
+
+    for (i = 0; i < 6U; i++) {
+        x = sx + (int)ox[i];
+        y = sy + (int)oy[i];
+        if (x < 0 || y < (int)HUD_ROWS)
+            continue;
+        plot_px(seg, (unsigned)x, (unsigned)y, 4);
+    }
+}
+
 static void draw_hostages(unsigned seg, dirty_list *list)
 {
     int i, sx, sy;
@@ -4334,6 +4356,7 @@ static void draw_hostages(unsigned seg, dirty_list *list)
         sx = world_to_sx(hostage_x[i] - 4U);
         if (act == HST_DIE) {
             blit_aligned(seg, sx, sy, hostage_die_e, list);
+            draw_crush_blood(seg, sx, sy);
             continue;
         }
         if (act == 0U) {
