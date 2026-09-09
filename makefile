@@ -1,22 +1,24 @@
 # Choplifter! for the IBM PCjr -- build file for M1 (video spike), M2
 # (chopper on screen), M3 (blit_rle + per-buffer dirty lists), M4
 # (scrolling world), M5 (flight: physics, 11-step tilt, joystick), M6
-# (hostages: spawn, board, unload, rescue counter) and M7 (combat:
-# tanks, jets, saucers, bullets, death and sortie cycle).
+# (hostages: spawn, board, unload, rescue counter), M7 (combat:
+# tanks, jets, saucers, bullets, death and sortie cycle), M8
+# (SN76496 effects with voice stealing) and M9 (HUD, title, sortie
+# banners, win and lose).
 #
 # For Open Watcom's wmake.  Toolchain per DESIGN.md section 12: Open Watcom
 # C/C++ V2 16-bit for logic, NASM for the primitives, wlink to put them
 # together, wmake to drive it.
 #
-#   wmake              build build\m1.exe through build\m7.exe
+#   wmake              build build\m1.exe through build\m9.exe
 #   wmake run          build, then launch DOSBox-X with a 128 KB PCjr config
 #   wmake run-dev      as above but with a roomier machine, for quick iteration
 #   wmake run-batch    128 KB PCjr, /batch /nogfx, captured to build\M1.LOG,
 #                      and DOSBox-X exits by itself
 #   wmake clean        remove build products
 #
-# Do not add a run-m2 ... run-m7 target that launches
-# the emulator unannounced.  M2-M7 are attended visuals; compile-only until
+# Do not add a run-m2 ... run-m9 target that launches
+# the emulator unannounced.  M2-M9 are attended visuals; compile-only until
 # someone is watching.
 #
 # Override any tool path on the command line, e.g.
@@ -74,6 +76,8 @@ M4      = $(BUILD)\m4.exe
 M5      = $(BUILD)\m5.exe
 M6      = $(BUILD)\m6.exe
 M7      = $(BUILD)\m7.exe
+M8      = $(BUILD)\m8.exe
+M9      = $(BUILD)\m9.exe
 
 # -0     genuine 8086/8088 code generation.  The PCjr is an 8088; anything
 #        later would assemble instructions the machine does not have.
@@ -98,8 +102,10 @@ M4OBJS  = $(BUILD)\m4.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(
 M5OBJS  = $(BUILD)\m5.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
 M6OBJS  = $(BUILD)\m6.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\sprdata_host.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
 M7OBJS  = $(BUILD)\m7.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\sprdata_host.obj $(BUILD)\sprdata_combat.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
+M8OBJS  = $(BUILD)\m8.obj $(BUILD)\snd.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\sprdata_host.obj $(BUILD)\sprdata_combat.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
+M9OBJS  = $(BUILD)\m9.obj $(BUILD)\snd.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\sprdata_host.obj $(BUILD)\sprdata_combat.obj $(BUILD)\sprdata_title.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
 
-all : $(M1) $(M2) $(M3) $(M4) $(M5) $(M6) $(M7) .SYMBOLIC
+all : $(M1) $(M2) $(M3) $(M4) $(M5) $(M6) $(M7) $(M8) $(M9) .SYMBOLIC
 
 $(M1) : $(M1OBJS)
 	$(LINK) system dos name $(M1) option quiet option stack=8192 option map=$(BUILD)\m1.map file { $(M1OBJS) }
@@ -121,6 +127,12 @@ $(M6) : $(M6OBJS)
 
 $(M7) : $(M7OBJS)
 	$(LINK) system dos name $(M7) option quiet option stack=8192 option map=$(BUILD)\m7.map file { $(M7OBJS) }
+
+$(M8) : $(M8OBJS)
+	$(LINK) system dos name $(M8) option quiet option stack=8192 option map=$(BUILD)\m8.map file { $(M8OBJS) }
+
+$(M9) : $(M9OBJS)
+	$(LINK) system dos name $(M9) option quiet option stack=8192 option map=$(BUILD)\m9.map file { $(M9OBJS) }
 
 $(BUILD)\m1.obj : $(SRC)\m1.c $(SRC)\pcjr.h
 	@if not exist $(BUILD) mkdir $(BUILD)
@@ -150,6 +162,18 @@ $(BUILD)\m7.obj : $(SRC)\m7.c $(SRC)\pcjr.h
 	@if not exist $(BUILD) mkdir $(BUILD)
 	$(CC) $(CFLAGS) -fo=$(BUILD)\m7.obj $(SRC)\m7.c
 
+$(BUILD)\m8.obj : $(SRC)\m8.c $(SRC)\pcjr.h $(SRC)\snd.h
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\m8.obj $(SRC)\m8.c
+
+$(BUILD)\m9.obj : $(SRC)\m9.c $(SRC)\pcjr.h $(SRC)\snd.h
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\m9.obj $(SRC)\m9.c
+
+$(BUILD)\snd.obj : $(SRC)\snd.c $(SRC)\snd.h
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\snd.obj $(SRC)\snd.c
+
 $(BUILD)\sprdata.obj : $(SRC)\sprdata.c
 	@if not exist $(BUILD) mkdir $(BUILD)
 	$(CC) $(CFLAGS) -fo=$(BUILD)\sprdata.obj $(SRC)\sprdata.c
@@ -169,6 +193,10 @@ $(BUILD)\sprdata_host.obj : $(SRC)\sprdata_host.c
 $(BUILD)\sprdata_combat.obj : $(SRC)\sprdata_combat.c
 	@if not exist $(BUILD) mkdir $(BUILD)
 	$(CC) $(CFLAGS) -fo=$(BUILD)\sprdata_combat.obj $(SRC)\sprdata_combat.c
+
+$(BUILD)\sprdata_title.obj : $(SRC)\sprdata_title.c
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\sprdata_title.obj $(SRC)\sprdata_title.c
 
 $(BUILD)\pztimer.obj : $(ASMDIR)\pztimer.asm
 	@if not exist $(BUILD) mkdir $(BUILD)

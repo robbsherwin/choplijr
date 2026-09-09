@@ -125,17 +125,17 @@ unsigned char mountain_03_o[] = {
 };
 
 /* house_00: Apple 27x11 -> PCjr 16x11 even / 18x11 odd; index 7; flattened isolated HGR pixels; coverage-OR X.
- *   .NN...NNNNN.....
- *   .NN..NNNNNNN....
- *   .NN.NNNN..NNN...
- *   ..NNNNNN..NNNN..
- *   .NN.NNNN..NNNNN.
- *   NNNNNNNNN.NNNNNN
- *   NNNNNNNN..NNNNNN
- *   NNNNNNNN..NNNNNN
- *   NNNNNNNNNNNNNNNN
- *   NNNNNNNNNNNNNNNN
- *   NNNNNNNNNNNNNNNN
+ *   .++...+++++.....
+ *   .++..+++++++....
+ *   .++.++++..+++...
+ *   ..++++++..++++..
+ *   .++.++++..+++++.
+ *   +++++++++.++++++
+ *   ++++++++..++++++
+ *   ++++++++..++++++
+ *   ++++++++++++++++
+ *   ++++++++++++++++
+ *   ++++++++++++++++
  */
 unsigned char house_e[] = {
     16, 11,  /* width_px, height_px; rest is RLE rows */
@@ -195,18 +195,18 @@ unsigned char house_sill_o[] = {
 };
 
 /* baseBuilding: Apple 51x12 -> PCjr 28x12 even / 30x12 odd; index 7; coverage-OR X.
- *   .NNNNNNNNNNNNNNNNNNNNNNNNNN.
- *   NNNNNNNNNNNNNNNNNNNNNNNNNNNN
- *   NNNNN.NNNNNNNNNN.NNNNNNNNNNN
- *   NNNNN.NNNNNNNNNN.NNNNNNNNNNN
- *   NNNNNNNNNNNNN..N.NNNNNNNNNNN
- *   NN....NN...NN..N.N...NN...NN
- *   NN....NN...NN..N.N...NN...NN
- *   NNNNNNNNNNNNNN.N.NNNNNNNNNNN
- *   NNNNN.NNNNNNN..N.NNNNNNNNNNN
- *   NNNNN.NNNNNNN..N.NNNNNNNNNNN
- *   NNNNNNNNNNNNNNNNNNNNNNNNNNNN
- *   NNNNNNNNNNNNNNNNNNNNNNNNNNNN
+ *   .++++++++++++++++++++++++++.
+ *   ++++++++++++++++++++++++++++
+ *   +++++.++++++++++.+++++++++++
+ *   +++++.++++++++++.+++++++++++
+ *   +++++++++++++..+.+++++++++++
+ *   ++....++...++..+.+...++...++
+ *   ++....++...++..+.+...++...++
+ *   ++++++++++++++.+.+++++++++++
+ *   +++++.+++++++..+.+++++++++++
+ *   +++++.+++++++..+.+++++++++++
+ *   ++++++++++++++++++++++++++++
+ *   ++++++++++++++++++++++++++++
  */
 unsigned char base_building_e[] = {
     28, 12,  /* width_px, height_px; rest is RLE rows */
@@ -369,11 +369,11 @@ unsigned char base_flag_01_o[] = {
 };
 
 /* fenceTowerSprite4: Apple 7x5 -> PCjr 4x5 even / 6x5 odd; index 7; coverage-OR X.
- *   NN.N
- *   .NNN
- *   .NNN
- *   .NNN
- *   .NNN
+ *   ++.+
+ *   .+++
+ *   .+++
+ *   .+++
+ *   .+++
  */
 unsigned char fence_4_e[] = {
     4, 5,  /* width_px, height_px; rest is RLE rows */
@@ -392,12 +392,12 @@ unsigned char fence_4_o[] = {
 };
 
 /* fenceTowerSprite3: Apple 10x6 -> PCjr 6x6 even / 8x6 odd; index 7; coverage-OR X.
- *   .N...N
- *   .NNNNN
- *   .NN.NN
- *   .NNNNN
- *   .NN.NN
- *   .NN.NN
+ *   .+...+
+ *   .+++++
+ *   .++.++
+ *   .+++++
+ *   .++.++
+ *   .++.++
  */
 unsigned char fence_3_e[] = {
     6, 6,  /* width_px, height_px; rest is RLE rows */
@@ -418,13 +418,13 @@ unsigned char fence_3_o[] = {
 };
 
 /* fenceTowerSprite2: Apple 11x7 -> PCjr 6x7 even / 8x7 odd; index 7; coverage-OR X.
- *   NN..NN
- *   NNNNNN
- *   .NNNN.
- *   .NNNN.
- *   .NNNN.
- *   .NNNN.
- *   .NNNN.
+ *   ++..++
+ *   ++++++
+ *   .++++.
+ *   .++++.
+ *   .++++.
+ *   .++++.
+ *   .++++.
  */
 unsigned char fence_2_e[] = {
     6, 7,  /* width_px, height_px; rest is RLE rows */
@@ -446,15 +446,15 @@ unsigned char fence_2_o[] = {
 };
 
 /* fenceTowerSprite1: Apple 17x9 -> PCjr 10x9 even / 12x9 odd; index 7; coverage-OR X.
- *   NNN....NNN
- *   NNNNNNNNNN
- *   .NNNNNNNN.
- *   .NNNN.NNN.
- *   .NNNN.NNN.
- *   .NNNNNNNN.
- *   .NNNNNNNN.
- *   .NNNN.NNN.
- *   .NNNN.NNN.
+ *   +++....+++
+ *   ++++++++++
+ *   .++++++++.
+ *   .++++.+++.
+ *   .++++.+++.
+ *   .++++++++.
+ *   .++++++++.
+ *   .++++.+++.
+ *   .++++.+++.
  */
 unsigned char fence_1_e[] = {
     10, 9,  /* width_px, height_px; rest is RLE rows */
@@ -485,17 +485,17 @@ unsigned char fence_1_o[] = {
 };
 
 /* fenceTowerSprite0: Apple 17x11 -> PCjr 10x11 even / 12x11 odd; index 7; coverage-OR X.
- *   NNN.....NN
- *   NNNN...NNN
- *   .NNNNNNNNN
- *   .NNNNNNNN.
- *   .NNNN.NNN.
- *   .NNNN.NNN.
- *   .NNNN.NNN.
- *   .NNNNNNNN.
- *   .NNNNNNNN.
- *   .NNNN.NNN.
- *   .NNNN.NNN.
+ *   +++.....++
+ *   ++++...+++
+ *   .+++++++++
+ *   .++++++++.
+ *   .++++.+++.
+ *   .++++.+++.
+ *   .++++.+++.
+ *   .++++++++.
+ *   .++++++++.
+ *   .++++.+++.
+ *   .++++.+++.
  */
 unsigned char fence_0_e[] = {
     10, 11,  /* width_px, height_px; rest is RLE rows */

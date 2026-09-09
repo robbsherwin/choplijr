@@ -18,10 +18,14 @@ section 6); index 15 (white).
 M7: combat art in src/sprdata_combat.c (jets even-only, tanks even-only,
 bullets even/odd, explosions, burning house, saucer).  Linked into m7.exe.
 
+M9: title / sortie / win-lose art in src/sprdata_title.c (even-X only,
+index 15 white).  HUD digits and the 24x8 counter bubbles are new art in
+m9.c, not conversions (DESIGN.md section 6).
+
 Reads CHOPGFX through extract_chopgfx.py (no PIL). Each sprite:
   - width_px, height_px, then payload
   - even-X copy and odd-X copy (one nibble shift, padded to even width)
-  - index 0 transparent; chopper body 2 / topside 10; rotors 15
+  - index 0 transparent; chopper body 15 / topside 7; rotors 15
   - scenery is one palette-role index per sprite (section 5)
 
 RLE row: { skip_bytes, run_bytes, data[run_bytes] }* 0x00 0x00
@@ -51,14 +55,17 @@ OUT_RLE = REPO / "src" / "sprdata_rle.c"
 OUT_WORLD = REPO / "src" / "sprdata_world.c"
 OUT_HOST = REPO / "src" / "sprdata_host.c"
 OUT_COMBAT = REPO / "src" / "sprdata_combat.c"
+OUT_TITLE = REPO / "src" / "sprdata_title.c"
 
-IDX_BODY = 2        # palette role: chopper body (olive)
-IDX_HIGHLIGHT = 10  # chopper highlight / topside
+IDX_BODY = 15       # chopper body (white)
+IDX_HIGHLIGHT = 7   # chopper highlight / shadow (light grey)
 IDX_ROTOR = 15      # rotor disc (white)
 IDX_HOSTAGE = 15    # hostage figures (white; mode 8 IRGB 15)
-IDX_TANK = 4        # enemy tanks (red)
+IDX_TANK = 10       # tank body (light green)
+IDX_TANK_HI = 2     # tank highlight / shadow (dark green)
 IDX_TREAD = 7       # tank treads (light grey)
-IDX_JET = 5         # enemy jets (magenta)
+IDX_JET = 5         # jet body (palette 5 -> light cyan)
+IDX_JET_HI = 3      # jet highlight / shadow (dark cyan)
 IDX_SAUCER = 13     # alien saucer (light magenta)
 IDX_EXPLODE = 14    # explosion (yellow)
 IDX_BULLET = 15     # chopper bullets / muzzle (white)
@@ -132,6 +139,20 @@ COMBAT_BULLETS = (
     ("bullet_04", IDX_BULLET,  "muzzle"),
 )
 
+# M9 presentation.  Even-X only, index 15 (white).  HUD digits / 24x8
+# bubbles are new art in m9.c (DESIGN.md section 6).
+TITLE = (
+    ("titleGraphics_00",  "title_mission"),
+    ("titleGraphics_01",  "title_logo"),
+    ("titleGraphics_02",  "title_broderbund"),
+    ("titleGraphics_03",  "title_gorlin"),
+    ("titleGraphics_04",  "title_the_end"),
+    ("titleGraphics_05",  "title_crown"),
+    ("sortieGraphics_00", "sortie_first"),
+    ("sortieGraphics_01", "sortie_second"),
+    ("sortieGraphics_02", "sortie_third"),
+)
+
 
 def find_entry(name):
     entries = chopgfx.parse_sprite_tables()
@@ -199,6 +220,11 @@ def flatten_isolated(ink_rows):
 
 def colour_body(ink_rows):
     """1bpp ink -> mode-8 indices. Topside ink (no ink above) is highlight."""
+    return colour_pair(ink_rows, IDX_BODY, IDX_HIGHLIGHT)
+
+
+def colour_pair(ink_rows, body, hi):
+    """Topside ink (no ink above) is highlight; the rest is body."""
     h = len(ink_rows)
     w = len(ink_rows[0])
     out = []
@@ -208,9 +234,9 @@ def colour_body(ink_rows):
             if not ink_rows[y][x]:
                 row.append(0)
             elif y == 0 or not ink_rows[y - 1][x]:
-                row.append(IDX_HIGHLIGHT)
+                row.append(hi)
             else:
-                row.append(IDX_BODY)
+                row.append(body)
         out.append(row)
     return out
 
@@ -337,7 +363,8 @@ def preshift_odd(pix):
 
 
 def ascii_preview(pix):
-    glyphs = {0: ".", 2: "#", 4: "R", 7: "N", 8: "M", 10: "+", 15: "="}
+    glyphs = {0: ".", 2: "d", 3: "c", 4: "R", 5: "J", 7: "+", 8: "M",
+              10: "#", 13: "A", 14: "Y", 15: "="}
     lines = []
     for row in pix:
         lines.append("".join(glyphs.get(p, "?") for p in row))
@@ -352,7 +379,7 @@ def c_bytes(data, indent="    "):
     return "\n".join(lines)
 
 
-def convert_one(mem, name, role, colour=0, widen=True):
+def convert_one(mem, name, role, colour=0, widen=True, colour_hi=None):
     entry = find_entry(name)
     w, h = mem[entry["addr"]], mem[entry["addr"] + 1]
     if role == "flat":
@@ -377,6 +404,8 @@ def convert_one(mem, name, role, colour=0, widen=True):
     scaled = [scale_row_or(row, w, dst_w) for row in ink]
     if role == "rotor":
         pix = colour_rotor(scaled)
+    elif colour_hi is not None:
+        pix = colour_pair(scaled, colour, colour_hi)
     elif role == "flat" or role == "host":
         pix = colour_flat(scaled, colour)
     else:
@@ -444,7 +473,7 @@ def main():
  * M2 flying chopper set (DESIGN.md sections 6 and 13): 11 side tilts,
  * 5 head-on, 3 main-rotor, 4 tail-rotor.  Each sprite has an even-X copy
  * and an odd-X pre-shift (leading transparent nibble).  Index 0 is
- * transparent, 2 body, 10 topside, 15 rotor.  RLE lives in sprdata_rle.c.
+ * transparent, 15 body, 7 topside, 15 rotor.  RLE lives in sprdata_rle.c.
  */
 """)
 
@@ -462,7 +491,7 @@ def main():
  * skip_bytes advances the dest (transparent).  run_bytes >= 2 is a fully
  * opaque run (REP MOVSB).  run_bytes == 1 is one byte, possibly a mixed
  * nibble edge.  Trailing transparency is implicit.  Index 0 transparent,
- * 2 body, 10 topside, 15 rotor.
+ * 15 body, 7 topside, 15 rotor.
  */
 """)
 
@@ -690,9 +719,15 @@ def main():
 
     for prefix, count, colour, cprefix, widen in COMBAT_EVEN:
         even_names = []
+        hi = None
+        if prefix == "jetMaster":
+            hi = IDX_JET_HI
+        elif prefix == "tankCannon":
+            hi = IDX_TANK_HI
         for i in range(count):
             name = f"{prefix}_{i:02d}"
-            spr = convert_one(mem, name, "host", colour=colour, widen=widen)
+            spr = convert_one(mem, name, "host", colour=colour, widen=widen,
+                              colour_hi=hi)
             ident = f"{cprefix}_{i:02d}_e"
             even_names.append(ident)
             extra = " even-only;"
@@ -718,7 +753,9 @@ def main():
         )
 
     for name, colour, ident, widen, role in COMBAT_EVEN_ONE:
-        spr = convert_one(mem, name, role, colour=colour, widen=widen)
+        hi = IDX_TANK_HI if name == "tank_00" else None
+        spr = convert_one(mem, name, role, colour=colour, widen=widen,
+                          colour_hi=hi)
         extra = " even-only;"
         if spr["flattened"]:
             extra += " flattened isolated HGR pixels;"
@@ -766,6 +803,41 @@ def main():
     OUT_COMBAT.write_text("".join(combat).replace("\r\n", "\n"), encoding="ascii")
     print(f"wrote {OUT_COMBAT.relative_to(REPO)}")
     print(f"  combat rle {combat_b} bytes  {combat_n} sprites")
+
+    title = []
+    title.append("""/* sprdata_title.c -- RLE title / sortie / win-lose art for M9 (blit_rle_m8).
+ *
+ * Generated by tools/build_sprites.py.  Do not hand-edit the arrays;
+ * change the converter and re-run it.
+ *
+ * Even-X only, index 15 (white).  Linked into m9.exe.  HUD digits and the
+ * 24x8 counter bubbles are new art in m9.c, not conversions.
+ */
+""")
+    title_b = 0
+    title_n = 0
+    for name, ident in TITLE:
+        spr = convert_one(mem, name, "host", colour=IDX_BODY, widen=False)
+        extra = " even-only;"
+        if spr["flattened"]:
+            extra += " flattened isolated HGR pixels;"
+        title.append(
+            f"/* {spr['name']}: Apple {spr['apple_w']}x{spr['apple_h']} -> "
+            f"PCjr {spr['even_w']}x{spr['h']} even-only; index 15;"
+            f"{extra} coverage-OR X. */\n"
+        )
+        title.append(emit_rle_array(ident, spr["even_rle"]))
+        title.append("\n")
+        title_b += len(spr["even_rle"])
+        title_n += 1
+    title.append(
+        "unsigned char *sortie_banner_e[3] = {\n"
+        "    sortie_first, sortie_second, sortie_third\n"
+        "};\n"
+    )
+    OUT_TITLE.write_text("".join(title).replace("\r\n", "\n"), encoding="ascii")
+    print(f"wrote {OUT_TITLE.relative_to(REPO)}")
+    print(f"  title rle {title_b} bytes  {title_n} sprites")
 
 
 if __name__ == "__main__":

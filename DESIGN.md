@@ -682,14 +682,18 @@ reference for shape and dimension. To be built:
   spikes. M6 hostages (run / wave / board, 8×11, index 15) are RLE in
   `src/sprdata_host.c`, linked into `m6.exe`. Combat art (tanks, 25 jet
   frames even-only, saucers, bullets even/odd, explosions, burning house) is
-  RLE in `src/sprdata_combat.c`, linked into `m7.exe`.
+  RLE in `src/sprdata_combat.c`, linked into `m7.exe` and later spikes.
+  Title, sortie, and win/lose art is even-X RLE in `src/sprdata_title.c`,
+  linked into `m9.exe`. HUD digits and the 24×8 bubbles are new art in
+  `src/m9.c`.
   Later:
   PNG sheets, generated NASM include. Flashparty's
   `lib/repos/pcjr-flashparty-2018/tools/convert_gfx_to_bios_format.py` handles
   mode 8 packing and is worth cribbing. No PIL; zlib PNG write stays in
   `extract_chopgfx.py`.
-- `tools/build_sound.py` — effect definitions → SN76496 register streams.
-  Foster's `fosquesttools/sound.py` is the model.
+- `tools/build_sound.py` — prints Apple `playSound` X/Y/A → SN76496 `N=X<<2`.
+  Streams live in `src/snd.c` (checked in). Foster's `fosquesttools/sound.py`
+  is the tagged F/V/W model if we grow a generator later.
 
 ---
 
@@ -746,8 +750,20 @@ still stubbed. The F1 debug HUD stays off by default.
 M7 is a **compiling increment**, not a hardware GO. `build\m7.exe` is M6
 hostages plus tanks, jets, saucers, chopper bullets, collisions, barracks
 fires, the type 1/2 explosion and sink cycle, and three sorties. Fire is
-no longer a stub. Sound is still M8. Sortie banners and win/lose art are
+no longer a stub. Sound is M8. Sortie banners and win/lose art are
 M9. The F1 debug HUD stays off by default.
+
+M8 is a **compiling increment**, not a hardware GO. `build\m8.exe` is M7
+combat plus SN76496 effects (`src/snd.c`): three tone voices with
+jrpiano3 round-robin steal, noise for shells/explosions/crash, Ctrl-S
+mute, port `61h` gate. Apple `playSound` does not block the sim. Title
+PVM music is still optional and not here.
+
+M9 is a **compiling increment**, not a hardware GO. `build\m9.exe` is M8
+sound plus presentation: 24×8 HUD bubbles with 5×7 digits, converted
+title and sortie art (`src/sprdata_title.c`), Broderbund / logo / Gorlin
+/ mission screens after the BIOS menu, and the crown / The End overlays.
+No attract loop (section 15). Title PVM music is still optional.
 
 ---
 
