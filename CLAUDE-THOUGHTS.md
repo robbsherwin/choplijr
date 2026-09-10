@@ -1,11 +1,136 @@
 # Architecture review: where the frame budget is actually going
 
 Written after reading `DESIGN.md`, `docs/TIMINGS.md`, `docs/M10.md`, `src/m10.c`,
-and `src/asm/{blit,prims,dosmem,stick}.asm`. This is a code-reading exercise, not
-a new hardware measurement — nothing here should go in `TIMINGS.md`. Where I
-cite an 8088 instruction cost (DIV, a far call, a segment-register load) that is
-a documented property of the CPU, not a measurement of this program. Everything
-in this file is a hypothesis to go test, ranked by how well the code supports it.
+and `src/asm/{blit,prims,dosmem,stick}.asm`. This started as a code-reading
+exercise, not a hardware measurement, and every number quoted inline below is
+still an emulator smoke test (DOSBox-X, fixed-cycle 8086 core, no PCjr wait-state
+model) — a relative A/B between builds, not a replacement for a hardware figure.
+Where an 8088 instruction cost is cited (DIV, a far call, a segment-register
+load), that is a documented property of the CPU, not a measurement of this
+program.
+
+**Update:** all three findings below were since taken to real hardware
+(`docs/claude-logs/M10-02.LOG`, `M10-FORC.LOG`, `M10-CLIP.LOG`; transcribed into
+`docs/TIMINGS.md` and `docs/M10.md`, which are the citable numbers from here on).
+The bbox + sky-gradient cut moved 73→69 BIOS ticks (4.98→5.27 Hz) on the standard
+pad log — smaller than either flag alone predicted, in the same direction as
+predicted. The fire-remap fix is confirmed dramatically: `/forceclip` (old path)
+nearly doubles present cost on real hardware (+99%, bigger than the emulator's
++90%), `/forcefire` (new path) costs +5.8% (versus the emulator's +3.7%) — real
+wait states make the old per-byte `peek_byte`/`poke_byte` fallback even more
+expensive relative to `rep`-adjacent assembly than the emulator's fixed-cycle
+core showed. The present at `sim_frame 4` still overflows the Zen timer
+identically in every one of these hardware logs; nothing below closes that gap
+on its own. Treat everything past this point as the reasoning that produced
+those results, not as a live number in its own right — the hardware logs above
+are authoritative where they overlap with anything quoted below.
+
+## ⚠ DGROUP margin: a near-miss, read this before adding any more static data
+
+Continuing the investigation (phase-timing instrumentation, see the present-
+sub-phase breakdown below) turned up a real crash, caused by this review's own
+changes, and a more important discovery underneath it.
+
+The breakdown pointed at `blit_at`'s `ws_add_blit(rle_run_bytes(s, h))` —
+`rle_run_bytes` re-walks a sprite's entire RLE stream a second time, purely to
+produce the WORKSET byte count, redundant with the blit that is about to walk
+the same bytes. Measured cost: skipping it (`/noworkset`, a debug flag added
+alongside `/forceclip`/`/forcefire`) took a reproducible, deterministic
+84→68 BIOS ticks on the standard pad scene — about 19% of present's total
+cost, paid on every blit, the entire time this investigation has been running.
+
+The fix attempted was a small round-robin cache (16 entries, ~98 bytes of
+static arrays) so the common case — the same handful of sprite pointers
+(chopper frames, mountain tiles, scenery) repeating every tick — hits a cheap
+pointer-compare loop instead of a full re-parse. It compiled clean and **it
+crashed on real DOSBox-X: no output at all, reproducibly, 3/3 runs**, even
+with the cache *function* provably unused (dead code, flagged by the compiler
+warning) — reverting only the call site did not fix it; removing the arrays
+and the function did.
+
+The actual cause: this is an Open Watcom **small model** build (`-ms`),
+which caps all near static data — every `static`/global variable plus the
+runtime stack — at 64 KB total (`DGROUP`). Checking the link map across this
+session's builds:
+
+| Build | DGROUP+stack | Margin to 64 KB |
+|---|---:|---:|
+| Original, before this review (`m10-os.map`) | 63,152 B | 2,384 B |
+| + bbox pre-check, sky-gradient table, phase timing, debug flags | 65,312 B | 224 B |
+| + the byte-count cache (crashed) | 65,408 B | **128 B** |
+
+**This review's own fixes consumed 2,160 of the original 2,384-byte margin.**
+The cache's extra ~98 bytes crossing some threshold near the absolute limit is
+the most likely proximate cause, though the exact failure mode (stack growing
+into `_BSS`, which the map shows sitting immediately adjacent with no gap, is
+the leading theory) was not root-caused further — there is no source-level
+debugger available in this loop, and guessing at a second fix without one
+would repeat the same mistake. The cache is reverted; current state (bbox +
+sky-gradient + fire-remap + phase timing + `/forceclip`/`/forcefire`/
+`/noworkset`, no cache) is back to a 224-byte margin and confirmed stable
+(3/3 DOSBox-X runs after the revert, matching pre-crash numbers exactly).
+
+**224 bytes is not a safe margin.** M10's own remaining scope item —
+palette-effect tuning (cycling registers 3/12 for rotor/muzzle/explosion/fire,
+`docs/M10.md` item 3) — will want new static state (timers, cycle tables) and
+could exhaust this without warning, the same way the cache just did.
+
+**Audited and fixed, without needing the debugger.** Comparing the linker map
+segment-by-segment against the pre-review build (`m10-os.map`) rather than
+guessing: of the 2,160 bytes consumed, only 292 were `_BSS` (the actual new
+variables — `dirty_bbox` helpers, `sky_pat_tab`, the `ph_*` accumulators, the
+three debug flags). **1,866 bytes were `CONST`** — string literals, almost
+entirely the verbose multi-paragraph explanations this review's own phase-
+timing printf output and `/forceclip`/`/forcefire`/`/noworkset` usage() text
+had accumulated. Moving those explanations into source comments (free — the
+compiler strips them) and cutting the printed and usage text to one terse
+line each recovered 1,278 bytes with zero functional change (confirmed:
+identical BIOS-tick count and byte counts before/after on the standard pad
+scene). **Current margin: 1,504 bytes**, not back to the original 2,384 but
+a real, verified, low-risk recovery — done without touching any game logic
+and without needing to choose between trimming further or moving off small
+model. That choice is deferred, not resolved; 1,504 bytes should comfortably
+survive M10's palette-tuning item, but re-check the `.map` file after adding
+its static state rather than assuming.
+
+The lesson generalises: **printf/usage text in this codebase is not free**,
+the same way a `DIV` or a far call is not free elsewhere in this document —
+it is real, permanent `CONST` space in a segment that is now known to be
+tight. Verbose runtime diagnostics belong in source comments; printed output
+should stay as terse as `docs/M10.md`'s own prose already is.
+
+**Fixed, the zero-storage way.** `blit_rle_m8`/`blit_rle_m8_fire` (NASM) now
+return the run-byte total (opaque + mixed) they copy, counted as a side
+effect of the blit's own row walk — `add [bp-2],cx` right where `.row`
+already knows a command's `run` length, accumulated in a local stack slot
+(`[bp-2]`) since every general register in that routine — ES, DS, SI, DI,
+BX, DX, AX, CX — was already committed to something else. `blit_at`
+(`src/m10.c`) uses that return value instead of a second `rle_run_bytes`
+pass on the fast path; the rare edge-of-screen `blit_rle_clip` path still
+does its own count, unchanged. Confirmed on the standard pad scene: **84→69
+BIOS ticks (4.33→5.27 Hz)** — matching the `/noworkset` prediction almost
+exactly (84→68) — with WORKSET byte counts identical before and after
+(872/859/1763, same mountain/scenery/sprites breakdown) and, per the map
+file, **zero new DGROUP bytes** (0xfa20 both before and after this change).
+Correctness, performance and memory margin all land clean simultaneously —
+the outcome the cache attempt was reaching for without needing new storage
+to get there.
+
+**A fair question surfaced a real bug: the phase-timing instrumentation
+itself was never free, and it was running unconditionally.** Each of the
+eight `bios_ticks()` calls per sim tick (added earlier this session to
+produce the present-sub-phase breakdown above) is a far call into
+`dosmem.asm` -- real cost, paid every tick, in *every* run including
+ordinary attended play with no debug flags at all, not just `/ztimer`
+batch tests. Made it opt-in (`/phases`, off by default, mirroring how
+`/ztimer` already works) rather than opt-out. Confirmed: 68 BIOS ticks with
+no flags (one better than the 69 measured with instrumentation always on),
+69 with `/phases` (identical breakdown to before), same WORKSET bytes
+either way. **A normal, flagless `M10` run now carries none of this
+session's diagnostic overhead** -- the byte-counting is already
+near-free via the asm return-value fix above, and the phase timing no
+longer runs unless explicitly asked for. This is the build worth trying on
+real hardware to judge actual playability, not a synthetic benchmark.
 
 ## The headline problem
 

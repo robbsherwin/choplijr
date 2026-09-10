@@ -198,9 +198,12 @@ void __cdecl blit_mask_m8(unsigned dseg, unsigned xbyte, unsigned y,
  * height_px, RLE rows }.  Each row is { skip, run, data[run] }* 0x00 0x00.
  * Opaque runs (run >= 2) are REP MOVSB; a 1-byte run is a store or a mixed
  * nibble RMW.  xbyte is a byte column; odd pixel X is a second pre-shifted
- * RLE copy.  Never a full-screen copy. */
-void __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
-                         unsigned sseg, unsigned soff);
+ * RLE copy.  Never a full-screen copy.  Returns the total run bytes (opaque
+ * + mixed) copied, counted as a side effect of the blit itself -- callers
+ * use this instead of a second C-side pass (rle_run_bytes) over the same
+ * RLE stream just to get a byte count for WORKSET/ZTIMER reporting. */
+unsigned __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
+                             unsigned sseg, unsigned soff);
 
 /* M10: same as blit_rle_m8, but every stored byte is passed through
  * fire_tab (an XLATB lookup) first -- the yellow-to-fire recolour m10.c's
@@ -209,9 +212,9 @@ void __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
  * transparent, so the row structure and REP-vs-RMW split are identical to
  * blit_rle_m8; an opaque run just can't be REP MOVSB since each byte needs
  * the table lookup.  Not a clipped blitter -- same edge-of-screen caveat as
- * blit_rle_m8. */
-void __cdecl blit_rle_m8_fire(unsigned dseg, unsigned xbyte, unsigned y,
-                              unsigned sseg, unsigned soff);
+ * blit_rle_m8.  Returns the same byte count as blit_rle_m8, same reason. */
+unsigned __cdecl blit_rle_m8_fire(unsigned dseg, unsigned xbyte, unsigned y,
+                                  unsigned sseg, unsigned soff);
 
 /* DGROUP segment.  Small-model near pointers are offsets from this. */
 unsigned __cdecl data_seg(void);

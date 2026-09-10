@@ -650,6 +650,29 @@ is the right trade for the eye, not because we are out of RAM. If something
 overflows the *video* hole, that is a page-reserve problem (section 3), not
 an art-budget problem.
 
+**A different, tighter ceiling this table does not show: small model's 64 KB
+DGROUP.** "Hundreds of KB spare" is true of total sidecar RAM and irrelevant
+to it. Small model (section 12) puts every `static`/global variable, every
+`const` array (sprite art included — it is read through `data_seg()`, DGROUP,
+not a separate segment), and the runtime stack in one 64 KB near-addressable
+group, independent of how much RAM the machine has. `CLAUDE-THOUGHTS.md`'s
+DGROUP-margin entry found `m10.exe` at 63,152 of 65,536 bytes (2,384 spare)
+before a round of hot-path fixes and instrumentation — none of it large
+individually — brought it to 65,312 (224 spare), and one more small addition
+(a ~98-byte cache) crashed the program outright on real DOSBox-X. Watcom did
+not error at 65,312/65,536, so a clean link is not proof of margin. Auditing
+the `.map` file segment-by-segment against the pre-review build (not
+guessing) found 1,866 of the 2,160 consumed bytes were `CONST` — printf and
+usage() string literals, not the 292 bytes of actual new variables; cutting
+that text to source comments plus terse output recovered 1,278 bytes at zero
+functional cost, back to 1,504 spare. Section 13's still-open palette-effect
+tuning will want new static state; re-check the `.map` file's DGROUP total
+after adding it, the same way, rather than assuming 1,504 bytes is enough.
+Section 12's "small **or** compact" already names the fallback if trimming
+cannot keep pace: compact model's data far pointers remove this ceiling, at
+the cost of `pcjr.h`'s ABI comment, which currently commits to "small or
+compact" — that door was left open on purpose.
+
 ---
 
 ## 12. Toolchain
@@ -779,15 +802,27 @@ title and sortie art (`src/sprdata_title.c`), Broderbund / logo / Gorlin
 / mission screens after the BIOS menu, and the crown / The End overlays.
 No attract loop (section 15). Title PVM music is still optional.
 
-M10 is a **compiling increment**, not a hardware GO. Five pad logs
+M10 is a **compiling increment**, not a hardware GO. Eight pad logs
 (same `/ztimer /batch /frames=60` command): pages 6/7 and stick 1 GO.
 Workset and Hz were flat through pre-flipped RLE (**4.00 Hz**, ~1151+1074
 bytes). Dirty-scenery restamp: restore/rle **872/851**, mountain **126**,
 sim **4.92 Hz** (74 BIOS ticks). Sheared-rotor RLE: restore still
 **872**, sprites **589→597**, **73** BIOS ticks (**4.98 Hz**); one PIT
-tick, not a win. Zen still overflowed
-(`J:\GAMES\CHOPLIJR\M10-01.LOG`). The M1 GO rates live in section 2; the live
-`M1.LOG` is gone. Section 7's ~26 ms line stays analysis. See `docs/M10.md`.
+tick, not a win. A code-reading pass (`CLAUDE-THOUGHTS.md`) argued the
+overflow was C-level CPU cost around the blits rather than memory
+bandwidth; a dirty-rect bounding-box pre-check plus a sky-gradient lookup
+table cut it further to **69 BIOS ticks (5.27 Hz)**, byte-for-byte the
+same pixels. Zen still overflowed the same way at the same sampled tick
+(`docs/claude-logs/M10-02.LOG`). Isolated separately (debug-only
+`/forcefire` / `/forceclip` switches, same pad scene): the C fallback
+`blit_fire` used for every explosion, muzzle flash, burning house and
+chopper death nearly doubles present cost (**+99%**,
+`docs/claude-logs/M10-CLIP.LOG`) for the same pixels a new assembly
+routine (`blit_rle_m8_fire`) draws for **+5.8%**
+(`docs/claude-logs/M10-FORC.LOG`) — a ~17x reduction this static pad scene
+could not have shown on its own, since it never sets `blit_fire`. The M1
+GO rates live in section 2; the live `M1.LOG` is gone. Section 7's ~26 ms
+line stays analysis. See `docs/M10.md` and `CLAUDE-THOUGHTS.md`.
 
 ---
 

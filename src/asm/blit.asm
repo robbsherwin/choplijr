@@ -135,8 +135,8 @@ _blit_mask_m8:
         ret
 
 ;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
-; void __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
-;                          unsigned sseg, unsigned soff)
+; unsigned __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
+;                              unsigned sseg, unsigned soff)
 ;
 ; soff -> { width_px, height_px, RLE rows }.  Each row is
 ;
@@ -147,6 +147,14 @@ _blit_mask_m8:
 ; a mixed nibble is a dest RMW, 00h is a skip.  0x00 0x00 ends the row;
 ; trailing transparency is implicit.
 ;
+; Returns the total run_bytes (opaque + mixed) copied -- what m10.c used to
+; get by having blit_at call rle_run_bytes() to re-walk this same stream a
+; second time in C, purely for the WORKSET/ZTIMER byte counts (measured at
+; ~19% of one present's cost; see CLAUDE-THOUGHTS.md).  Every general
+; register here is already committed (ES/DS/SI/DI/BX/DX/AX/CX), so the
+; running total lives in a local stack slot at [bp-2] instead, shared with
+; .row across calls since .row is a plain near CALL, not its own frame.
+;
 ; Caller guarantees: the sprite's byte span fits the 160-pixel width,
 ; y+height fits 200, height != 0.
 ;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
@@ -154,11 +162,14 @@ _blit_mask_m8:
 _blit_rle_m8:
         push    bp
         mov     bp,sp
+        sub     sp,2                    ; local: running byte total, [bp-2]
         push    di
         push    si
         push    ds
         push    es
         cld
+
+        mov     word [bp-2],0
 
         mov     es,[bp+4]               ; dseg
         mov     ax,[bp+8]               ; y
@@ -198,14 +209,18 @@ _blit_rle_m8:
         jnz     .even_row
 
 .done:
+        mov     ax,[bp-2]               ; return value: total bytes copied
         pop     es
         pop     ds
         pop     si
         pop     di
+        add     sp,2
         pop     bp
         ret
 
 ; One RLE row: DS:SI command stream, ES:DI dest.  BX pair base, DX rows left.
+; [bp-2] (outer frame, still valid: .row is a plain near CALL) accumulates
+; the running byte total across every row of this blit.
 .row:
         push    dx
 .next_cmd:
@@ -220,6 +235,7 @@ _blit_rle_m8:
         xor     ah,ah
         add     di,ax                   ; transparent dest bytes
         jcxz    .next_cmd
+        add     [bp-2],cx               ; count run bytes, opaque or mixed
         cmp     cx,1
         je      .one
         rep     movsb                   ; opaque run, both nibbles live
@@ -258,8 +274,8 @@ _blit_rle_m8:
         ret
 
 ;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
-; void __cdecl blit_rle_m8_fire(unsigned dseg, unsigned xbyte, unsigned y,
-;                               unsigned sseg, unsigned soff)
+; unsigned __cdecl blit_rle_m8_fire(unsigned dseg, unsigned xbyte, unsigned y,
+;                                   unsigned sseg, unsigned soff)
 ;
 ; Same RLE format and row walk as blit_rle_m8 above.  m10.c's fire remap
 ; (fire_byte/fire_nibble, called only with blit_fire == 1) only ever recolours
@@ -273,6 +289,9 @@ _blit_rle_m8:
 ; each byte needs an XLATB first.  fire_tab below is fixed for blit_fire == 1,
 ; the only value m10.c ever calls a fire blit with.
 ;
+; Returns the total run_bytes (opaque + mixed) copied, same [bp-2] local-slot
+; technique as blit_rle_m8 -- see that routine's comment.
+;
 ; Caller guarantees: the sprite's byte span fits the 160-pixel width,
 ; y+height fits 200, height != 0.  Same as blit_rle_m8; not a clipped
 ; blitter -- callers still fall back to blit_rle_clip near a screen edge.
@@ -281,11 +300,14 @@ _blit_rle_m8:
 _blit_rle_m8_fire:
         push    bp
         mov     bp,sp
+        sub     sp,2                    ; local: running byte total, [bp-2]
         push    di
         push    si
         push    ds
         push    es
         cld
+
+        mov     word [bp-2],0
 
         mov     es,[bp+4]               ; dseg
         mov     ax,[bp+8]               ; y
@@ -325,16 +347,19 @@ _blit_rle_m8_fire:
         jnz     .even_row
 
 .done:
+        mov     ax,[bp-2]               ; return value: total bytes copied
         pop     es
         pop     ds
         pop     si
         pop     di
+        add     sp,2
         pop     bp
         ret
 
 ; One RLE row, fire-remapped.  DS:SI command stream, ES:DI dest.  BX is the
 ; outer loop's pair base on entry -- saved and restored around this row's use
-; of BX as the fire_tab base for CS XLATB.
+; of BX as the fire_tab base for CS XLATB.  [bp-2] (outer frame) accumulates
+; the running byte total across every row of this blit.
 .row:
         push    dx
         push    bx
@@ -351,6 +376,7 @@ _blit_rle_m8_fire:
         xor     ah,ah
         add     di,ax                   ; transparent dest bytes
         jcxz    .next_cmd
+        add     [bp-2],cx               ; count run bytes, opaque or mixed
         cmp     cx,1
         je      .one
 .run:

@@ -46,28 +46,73 @@ pad, 0 scrolling, stick 1 live, no keys during the sample. 20 sim ticks /
 60 retraces. Sim target is 20 Hz. `/ztimer` wraps one present (restore +
 draw, not the HUD) at sim_frame 4.
 
-Latest capture: `J:\GAMES\CHOPLIJR\M10-01.LOG` (sheared rotor).
-Dirty-scenery is `M10.LOG`.
+Latest capture: `docs/claude-logs/M10-02.LOG` (dirty-rect bbox pre-check +
+sky-gradient precompute, see `CLAUDE-THOUGHTS.md`). Machine this round:
+**736 KB**, JrConfig auto-detected (`JRCONSYS` at `09C4:0000`, 64 KB at
+`1000h`), pages 6/7 — same pair as every prior cut, found automatically
+rather than falling back to the `/V64` guess. Sheared rotor RLE (previous
+latest) is `J:\GAMES\CHOPLIJR\M10-01.LOG`; dirty-scenery is `M10.LOG`.
 
-| | First pad | After shrink | Pre-flipped RLE | Dirty scenery | Sheared rotor RLE |
-|---|---:|---:|---:|---:|---:|
-| Log | — | — | — | `M10.LOG` | `M10-01.LOG` |
-| BIOS ticks | 100 | 89 | 91 | 74 | 73 |
-| Sim rate (target 20) | 3.64 Hz | 4.09 Hz | 4.00 Hz | 4.92 Hz | 4.98 Hz |
-| Restore bytes avg | 1151 | 1151 | 1151 | 872 | 872 |
-| RLE blit bytes avg | 1074 | 1074 | 1074 | 851 | 859 |
-| Video total avg | 2545 | 2545 | 2545 | 1755 | 1763 |
-| avg mountain | 607 | 607 | 607 | 126 | 126 |
-| avg scenery | 197 | 197 | 197 | 167 | 167 |
-| avg sprites | 589 | 589 | 589 | 589 | 597 |
-| Zen sim_frame 4 | overflow | overflow | overflow | overflow | overflow (>54 ms) |
+| | First pad | After shrink | Pre-flipped RLE | Dirty scenery | Sheared rotor RLE | bbox + sky-gradient |
+|---|---:|---:|---:|---:|---:|---:|
+| Log | — | — | — | `M10.LOG` | `M10-01.LOG` | `M10-02.LOG` |
+| BIOS ticks | 100 | 89 | 91 | 74 | 73 | 69 |
+| Sim rate (target 20) | 3.64 Hz | 4.09 Hz | 4.00 Hz | 4.92 Hz | 4.98 Hz | 5.27 Hz |
+| Restore bytes avg | 1151 | 1151 | 1151 | 872 | 872 | 872 |
+| RLE blit bytes avg | 1074 | 1074 | 1074 | 851 | 859 | 859 |
+| Video total avg | 2545 | 2545 | 2545 | 1755 | 1763 | 1763 |
+| avg mountain | 607 | 607 | 607 | 126 | 126 | 126 |
+| avg scenery | 197 | 197 | 197 | 167 | 167 | 167 |
+| avg sprites | 589 | 589 | 589 | 589 | 597 | 597 |
+| Zen sim_frame 4 | overflow | overflow | overflow | overflow | overflow (>54 ms) | overflow (>54 ms) |
 
 73 vs 74 BIOS ticks is one PIT tick on a ~1 s sample. Do not treat
-**4.98 Hz** as a speedup over **4.92 Hz**.
+**4.98 Hz** as a speedup over **4.92 Hz**. 73→69 (**4.98→5.27 Hz**) is a
+real four-tick move, not PIT jitter, and every WORKSET byte count stayed
+identical to the sheared-rotor cut — same pixels, less C-level cost to draw
+them. Zen still overflowed at the same sampled tick with the same byte
+counts (restore 968, blit 830, video 1798); this cut did not touch whatever
+is costing that present the rest of its time.
 
 Dirty-scenery restamp is the cut that moved the pad workset (mountain
 607→126, restore 1151→872). Sheared rotor RLE put the disc in the RLE
-total (sprites 589→597); restore stayed 872.
+total (sprites 589→597); restore stayed 872. bbox + sky-gradient did not
+change the workset at all (see `CLAUDE-THOUGHTS.md`'s dirty-rect and
+sky-gradient entries) — it removed C-level cost around the same bytes,
+which is a different kind of cut than the ones above it.
+
+### Fire-remap isolation: `/forcefire` vs `/forceclip`
+
+Same pad command, same machine, plus one of two debug-only switches added
+this session (`src/m10.c`, not a play mode): `/forceclip` routes every RLE
+blit through the old per-byte C fallback (`blit_rle_clip`), the path
+`blit_fire` used to take for every explosion, muzzle flash, burning house
+and chopper death; `/forcefire` routes every blit through the new
+`blit_rle_m8_fire` (NASM, `src/asm/blit.asm`), which keeps a `rep`-free but
+still-assembly `lodsb`/`xlatb`/`stosb` loop instead of falling back to C.
+Neither flag touches game state — same static pad scene, same bytes, only
+the routine drawing them changes. This static scene never sets `blit_fire`
+itself, so the plain `M10-02.LOG` baseline above is the "fire off" row here.
+
+| | fire off (`M10-02.LOG`) | `/forcefire` (`M10-FORC.LOG`) | `/forceclip` (`M10-CLIP.LOG`) |
+|---|---:|---:|---:|
+| BIOS ticks | 69 | 73 | 137 |
+| Sim rate (target 20) | 5.27 Hz | 4.98 Hz | 2.65 Hz |
+| vs. fire-off baseline | — | +4 ticks (+5.8%) | +68 ticks (+99%) |
+| WORKSET bytes | 872/859/1763 | 872/859/1763 | 872/859/1763 |
+| Zen sim_frame 4 | overflow, 968/830/1798 | overflow, 968/830/1798 | overflow, 968/830/1798 |
+
+Real hardware, not the DOSBox-X smoke test: forcing every blit onto the old
+C fallback very nearly doubles the frame's cost (+99%) for the same pixels;
+the new assembly fire path costs a 5.8% tax instead. That is roughly a 17x
+reduction in what a fire/explosion blit actually costs relative to a normal
+one. `blit_fire` is set for every explosion, muzzle flash, burning barracks
+and chopper death (`src/m10.c`, `draw_ents`) — moments this pad scene never
+reaches, which is why the plain M10-01/M10-02 pad logs could never show this
+gap. See `CLAUDE-THOUGHTS.md` for the emulator prediction (+3.7%/+90%) this
+confirms and the reasoning for why the remap can stay in assembly at all
+(it only ever recolours an already-opaque nibble, never changes what's
+transparent).
 
 ### Latest log detail (`M10-01.LOG`)
 

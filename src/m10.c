@@ -146,6 +146,24 @@ static int      opt_forcefire   = 0;        /* debug: every in-bounds blit_at
                                               * touching real game state.
                                               * Not a real mode -- isolates
                                               * the fire-remap fast path. */
+static int      opt_noworkset   = 0;        /* debug: skip ws_add_blit's
+                                              * rle_run_bytes() re-parse of
+                                              * every blitted sprite -- pure
+                                              * diagnostic cost, redundant
+                                              * with the blit itself.  Not a
+                                              * real mode; WORKSET/ZTIMER
+                                              * byte counts print as 0. */
+static int      opt_phases      = 0;        /* off by default: the ph_*
+                                              * phase-timing brackets each
+                                              * call bios_ticks() (a far call
+                                              * into dosmem.asm), real cost
+                                              * on every sim tick whether or
+                                              * not anyone reads the report.
+                                              * Diagnostic only; pass this to
+                                              * get the PHASE ticks report
+                                              * back, otherwise none of that
+                                              * overhead runs at all -- not
+                                              * even during ordinary play. */
 
 #define RETRACE_DEFAULT 180U            /* 3 s if a field costs one field */
 
@@ -1667,6 +1685,15 @@ static unsigned rle_run_bytes(unsigned char *s, unsigned rows)
     return n;
 }
 
+/* A round-robin byte-count cache here (attempted this session) reliably
+ * crashed on real DOSBox-X: DGROUP was already at 65408/65536 bytes before
+ * it (see CLAUDE-THOUGHTS.md's DGROUP-margin entry), and adding ~98 more
+ * bytes of static cache state was enough to tip something over, even with
+ * the cache function provably unused (dead code, confirmed by the compiler
+ * warning) -- reverting the *call* was not enough to un-crash it; only
+ * removing the arrays and the function did. Do not re-add without first
+ * bringing DGROUP margin back to at least several hundred bytes. */
+
 static void ws_add_blit(unsigned n)
 {
     if (n == 0U)
@@ -1743,6 +1770,15 @@ static unsigned long us_from_nsbyte(unsigned long bytes, unsigned long ns_per)
 static unsigned long ticks_to_us(unsigned ticks)
 {
     return ((unsigned long)ticks * 8381UL + 5000UL) / 10000UL;
+}
+
+/* BIOS tick (0040:006C) at 18.2065 Hz -> ms, integer only.  Used only for
+ * the ph_* phase sums, which are already a sum over many sim ticks -- a
+ * single tick's true duration is far finer than this counter's resolution,
+ * the same way run_bios_ticks already is. */
+static unsigned long bios_ticks_to_ms(unsigned long ticks)
+{
+    return (ticks * 54925UL + 500UL) / 1000UL;
 }
 
 static void print_workset(void)
@@ -2062,17 +2098,27 @@ static void blit_at(unsigned seg, int x_px, int y,
         return;
 
     xbyte0 = xbyte_from_px(x_px);
-    ws_add_blit(rle_run_bytes(s, (unsigned)h));
     if (!opt_forceclip && xbyte0 >= 0 &&
         (unsigned)(xbyte0 + wpx / 2) <= M8_BYTES_PER_ROW) {
+        /* The fast blitters return the run bytes (opaque + mixed) they
+         * just copied, counted as a side effect of the blit itself -- no
+         * second C-side pass over the same RLE stream needed here. */
+        unsigned n;
+
         if (blit_fire || opt_forcefire)
-            blit_rle_m8_fire(seg, (unsigned)xbyte0, (unsigned)y, data_seg(),
-                             (unsigned)s);
+            n = blit_rle_m8_fire(seg, (unsigned)xbyte0, (unsigned)y,
+                                 data_seg(), (unsigned)s);
         else
-            blit_rle_m8(seg, (unsigned)xbyte0, (unsigned)y, data_seg(),
-                        (unsigned)s);
-    } else
+            n = blit_rle_m8(seg, (unsigned)xbyte0, (unsigned)y, data_seg(),
+                            (unsigned)s);
+        if (!opt_noworkset)
+            ws_add_blit(n);
+    } else {
+        /* Rare edge-of-screen path; still needs its own count. */
+        if (!opt_noworkset)
+            ws_add_blit(rle_run_bytes(s, (unsigned)h));
         blit_rle_clip(seg, x_px, y, s, (unsigned)h);
+    }
 
     dirty_add(list, (unsigned)xb, (unsigned)y, (unsigned)wb, (unsigned)h);
 }
@@ -5447,6 +5493,21 @@ static unsigned long run_bios_ticks;
 static unsigned      run_sim_ticks;
 static unsigned      run_retraces;
 
+/* Phase breakdown, BIOS ticks summed over the whole run (18.2065 Hz, so a
+ * single sim_tick() or present() is usually well under one tick -- these are
+ * only meaningful as sums across every sim tick in the run, the same way
+ * run_bios_ticks/run_sim_ticks already are).  Added because /ztimer keeps
+ * overflowing its ~54 ms window on the present span, so there has never been
+ * a real number for how that time splits between sim_tick() (physics, AI,
+ * joystick, sound), present (restore + draw + HUD) and the two hardware
+ * retrace waits: the one after a sim tick's own present, and the two idle
+ * ticks between sim ticks (SIM_DIV).  ph_sim + ph_present + ph_flip +
+ * ph_idle should sum to ~run_bios_ticks; if it does not, something in the
+ * loop is spending time outside all four brackets. */
+static unsigned long ph_sim, ph_present, ph_flip, ph_idle;
+/* present's own five natural sub-phases; should sum to ~ph_present. */
+static unsigned long ph_restore, ph_mountain, ph_scenery, ph_sprites, ph_hud;
+
 static unsigned long bios_ticks(void)
 {
     unsigned lo, hi, lo2;
@@ -5565,6 +5626,8 @@ static void run_viewer(void)
     sim_frame = 0;
     back = 0;
     ws_reset();
+    ph_sim = ph_present = ph_flip = ph_idle = 0UL;
+    ph_restore = ph_mountain = ph_scenery = ph_sprites = ph_hud = 0UL;
 
     crt_page = page_b;
     set_pages(page_b, page_a);
@@ -5602,10 +5665,20 @@ static void run_viewer(void)
             int      scrolled;
             int      full_sc;
             int      do_z;
+            unsigned long tp0, tp1, t_simend;
 
             back_seg = back ? seg_b : seg_a;
             prev_scroll = scroll_x;
+            if (opt_phases)
+                tp0 = bios_ticks();
             sim_tick();
+            if (opt_phases) {
+                tp1 = bios_ticks();
+                ph_sim += tp1 - tp0;
+                t_simend = tp1;         /* present's span starts here; tp0/
+                                         * tp1 are reused below as rolling
+                                         * checkpoints for the sub-phases. */
+            }
             scrolled = (scroll_x != prev_scroll);
             ws_begin_tick();
 
@@ -5628,6 +5701,11 @@ static void run_viewer(void)
             if (full_sc)
                 band_hit |= restore_list(back_seg, &scenery_mark[back]);
 
+            if (opt_phases) {
+                tp0 = bios_ticks();
+                ph_restore += tp0 - tp1;
+            }
+
             /* Static camera and nothing erased over the ridge: the band on
              * this page is already right.  A camera move that changes
              * parallax still retile-fills the whole strip. */
@@ -5644,19 +5722,48 @@ static void run_viewer(void)
                                          scenery_mark[back].r, old_sc);
             }
 
+            if (opt_phases) {
+                tp1 = bios_ticks();
+                ph_mountain += tp1 - tp0;
+            }
+
             if (full_sc) {
                 draw_scenery(back_seg, sim_frame, &scenery_mark[back], 1,
                              0, 0U, (unsigned)back);
                 scenery_full[back] = 0;
             } else {
-                draw_scenery(back_seg, sim_frame, 0, 0, lists[back].r, old_n,
-                             (unsigned)back);
+                /* full=0 so this only draws what hit-tests dirty or has an
+                 * animation-state change (fire_changed / flag_changed) --
+                 * but list must still be real, not 0: a redraw here isn't
+                 * preceded by a restore (that only happens on a full_sc
+                 * pass), so an animated sprite whose frames don't share the
+                 * same opaque silhouette (house_fire_00_e vs _01_e, e.g.)
+                 * can leave a stale pixel where the old frame was opaque
+                 * and the new one is transparent -- RLE transparency means
+                 * "don't touch dest", so that pixel is never overwritten.
+                 * Tracking the footprint here (in scenery_mark, not lists,
+                 * so this can never alias the hit list being iterated over)
+                 * means the next full_sc pass's restore_list will erase it
+                 * before redrawing, closing that gap. */
+                draw_scenery(back_seg, sim_frame, &scenery_mark[back], 0,
+                             lists[back].r, old_n, (unsigned)back);
             }
+
+            if (opt_phases) {
+                tp0 = bios_ticks();
+                ph_scenery += tp0 - tp1;
+            }
+
             draw_ents(back_seg, &lists[back]);
             draw_chopper(back_seg, &lists[back]);
             draw_hostages(back_seg, &lists[back]);
             draw_sortie_banner(back_seg, &lists[back]);
             draw_end_banner(back_seg, &lists[back]);
+
+            if (opt_phases) {
+                tp1 = bios_ticks();
+                ph_sprites += tp1 - tp0;
+            }
 
             if (do_z) {
                 ztimer_off();
@@ -5672,13 +5779,33 @@ static void run_viewer(void)
             draw_hud(back_seg, back);
             ws_end_tick(scrolled);
 
+            if (opt_phases) {
+                tp0 = bios_ticks();
+                ph_hud += tp0 - tp1;
+                ph_present += tp0 - t_simend;  /* cross-check: should equal
+                                                 * ph_restore + ph_mountain +
+                                                 * ph_scenery + ph_sprites +
+                                                 * ph_hud. */
+            }
+
             vid_wait_retrace();
             crt_page = back ? page_b : page_a;
             set_pages(crt_page, back ? page_a : page_b);
 
+            if (opt_phases) {
+                tp1 = bios_ticks();
+                ph_flip += tp1 - tp0;
+            }
+
             back = !back;
         } else {
+            unsigned long ti0;
+
+            if (opt_phases)
+                ti0 = bios_ticks();
             vid_wait_retrace();
+            if (opt_phases)
+                ph_idle += bios_ticks() - ti0;
         }
 
         if (kbd_is_down(SCAN_ESC)) {
@@ -5713,12 +5840,12 @@ static void usage(void)
 "  /force       run even if the BIOS model byte is not a PCjr's\n"
 "  /ztimer      Zen-timer one present at sim_frame 4 (pad, dirty list live)\n"
 "  /ztimer=N    same, at sim_frame N.  Interrupts off; do not touch keys.\n"
-"  /forceclip   debug: every RLE blit takes the slow per-byte C fallback\n"
-"               (blit_rle_clip) instead of the fast blit_rle_m8 assembly\n"
-"               path.  Isolates the two paths' cost; not a play mode.\n"
-"  /forcefire   debug: every in-bounds RLE blit takes blit_rle_m8_fire, as\n"
-"               if blit_fire were set, without touching game state.\n"
-"               Isolates the fire-remap fast path; not a play mode.\n"
+"  /forceclip   debug: every RLE blit takes blit_rle_clip, not blit_rle_m8\n"
+"  /forcefire   debug: every in-bounds blit takes blit_rle_m8_fire\n"
+"  /noworkset   debug: skip WORKSET/ZTIMER byte counting (prints as 0)\n"
+"  /phases      debug: bios_ticks() phase breakdown (sim_tick/present/flip/\n"
+"               idle, plus present's 5 sub-phases).  Off by default -- this\n"
+"               instrumentation has a real per-tick cost otherwise.\n"
 "  /?           this\n"
 "\n"
 "Stick: Paku Paku 1.6a port 201h loop (CLI, bits high, timeout 7FFFh).\n"
@@ -5780,6 +5907,10 @@ static int parse_args(int argc, char **argv)
             opt_forceclip = 1;
         else if (strcmp(a, "forcefire") == 0)
             opt_forcefire = 1;
+        else if (strcmp(a, "noworkset") == 0)
+            opt_noworkset = 1;
+        else if (strcmp(a, "phases") == 0)
+            opt_phases = 1;
         else if (strncmp(a, "frames=", 7) == 0) {
             opt_frames = (unsigned)atoi(a + 7);
             saw_frames = 1;
@@ -6105,6 +6236,39 @@ int main(int argc, char **argv)
                " = %lu.%02lu Hz sim (target 20.00).\n",
                run_sim_ticks, run_retraces, run_bios_ticks,
                hz100 / 100UL, hz100 % 100UL);
+    }
+    /* BIOS ticks (18.2065 Hz), summed over the whole run -- a single sim
+     * tick is far finer than this counter, only the sum means anything,
+     * same caveat as the Measured line above.  sim_tick = physics/AI/
+     * joystick/sound.  present = restore+draw+HUD, the span /ztimer samples
+     * once and keeps overflowing.  flip = the sim tick's own retrace wait +
+     * page flip.  idle = the two non-sim retraces per SIM_DIV, hardware-
+     * timed dead time, not CPU cost.  present's own five sub-phases should
+     * sum to ~present: restore = restore_list + stars/moon, mountain =
+     * parallax retile, scenery = houses/fence/base, sprites = entities +
+     * chopper + hostages + banners, hud = draw_hud (cached: near 0 once
+     * both pages have drawn once, unless a counter changed this run). */
+    if (opt_phases) {
+        unsigned long ph_sum = ph_sim + ph_present + ph_flip + ph_idle;
+
+        printf("\nPHASE ticks (BIOS, sum over run; ms approx):\n");
+        printf("  sim_tick %5lu (%5lu ms)   present %5lu (%5lu ms)\n",
+               ph_sim, bios_ticks_to_ms(ph_sim),
+               ph_present, bios_ticks_to_ms(ph_present));
+        printf("  flip     %5lu (%5lu ms)   idle    %5lu (%5lu ms)\n",
+               ph_flip, bios_ticks_to_ms(ph_flip),
+               ph_idle, bios_ticks_to_ms(ph_idle));
+        printf("  sum %lu vs run_bios_ticks %lu\n", ph_sum, run_bios_ticks);
+        printf("  restore  %5lu (%5lu ms)   mountain %5lu (%5lu ms)\n",
+               ph_restore, bios_ticks_to_ms(ph_restore),
+               ph_mountain, bios_ticks_to_ms(ph_mountain));
+        printf("  scenery  %5lu (%5lu ms)   sprites  %5lu (%5lu ms)\n",
+               ph_scenery, bios_ticks_to_ms(ph_scenery),
+               ph_sprites, bios_ticks_to_ms(ph_sprites));
+        printf("  hud      %5lu (%5lu ms)   sub-sum  %5lu (present %5lu)\n",
+               ph_hud, bios_ticks_to_ms(ph_hud),
+               ph_restore + ph_mountain + ph_scenery + ph_sprites + ph_hud,
+               ph_present);
     }
     print_workset();
     if (opt_stick) {
