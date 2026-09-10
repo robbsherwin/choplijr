@@ -5,7 +5,8 @@
  * M4 scrolling world (camera lead, mountain parallax, scenery); M5 flight
  * (original physics, 11-step tilt, joystick); M6 hostages (spawn, board,
  * unload, rescue counter); M7 combat (tanks, jets, bullets, sorties);
- * M8 SN76496 effects; M9 presentation (HUD, title, banners, win/lose).
+ * M8 SN76496 effects; M9 presentation (HUD, title, banners, win/lose);
+ * M10 polish (hardware validation, optimisation, palette-effect tuning).
  * See DESIGN.md sections 3, 6, 7, 10, 11 and 13.
  *
  * Everything declared here is implemented in NASM under src/asm/.
@@ -177,6 +178,13 @@ void __cdecl fill_rect_m8(unsigned dseg, unsigned xbyte, unsigned y,
 /* Full-width horizontal band, the sky and ground primitive (section 6). */
 void __cdecl fill_band_m8(unsigned dseg, unsigned y, unsigned rows,
                           unsigned pattern);
+
+/* fill_rect_m8 with a different word per scanline (DGROUP near pointer).
+ * Sky Bayer restores: one stosw pattern per row, one bank walk.  wbytes
+ * must be even. */
+void __cdecl fill_rows_m8(unsigned dseg, unsigned xbyte, unsigned y,
+                          unsigned wbytes, unsigned rows,
+                          const unsigned *patterns);
 
 /* Packed mode-8 masked blit (M2).  Source is row-major packed nibbles,
  * wbytes per row, index 0 transparent.  xbyte is a byte column.  Odd pixel

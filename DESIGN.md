@@ -82,7 +82,10 @@ DRAM refresh; that path is not a substitute for filling a hardware page.
 
 ### Measured on real PCjr (M1, GO)
 
-Source: `J:\GAMES\CHOPLIJR\M1.LOG` (5,947 bytes). JrConfig
+Source: the M1 GO log (5,947 bytes) transcribed here. The live file at
+`J:\GAMES\CHOPLIJR\M1.LOG` is gone (an M10 pad report overwrote it; no
+copy remains). These rates are the GO transcription, not a reread.
+JrConfig
 `DEVICE=JRCONFIG.SYS /V64 /L`, 64 KB video at segment `1000h`, pages **6 and
 7**. Average of 8 runs, Zen timer, mode 8, writes to the hidden page. Owner
 judged attended visuals correct; page verification all yes. Emulator
@@ -102,7 +105,8 @@ judged attended visuals correct; page verification all yes. Emulator
 
 `ns/byte` and `ms/screen` are **derived** from the timed average, as quoted.
 They add no new assumptions. `stosb` has no derived line because the log's
-byte count for that row is not quoted here.
+byte count for that row is not quoted here. M10 pad workset and Hz are
+collected in `docs/TIMINGS.md`.
 
 Video `stosw` is 2803 ns/byte against the 1500 ns/byte prediction. Sidecar
 `stosw` is 1476 ns/byte, which is the prediction. The analysis table was a
@@ -333,8 +337,8 @@ timing-fragile. The game must not depend on it.
 **Dither only the sky bands.** At 160 × 200 the pixels are wide enough that a
 checkerboard reads as vertical stripes rather than a blend, so sprites stay
 flat colours with hard outlines. The exception is the sky, where a 4 × 4
-Bayer matrix over the band fills does read as a blend: `src/m9.c` fades haze
-into dark blue and dark blue into black that way. It stays free because the
+Bayer matrix over the band fills does read as a blend: `src/m9.c` and
+`src/m10.c` fade haze into dark blue and dark blue into black that way. It stays free because the
 pattern is a pure function of (x, y), so each row is still one `rep stosw` of
 a precomputed word and `restore_rect` can repaint under a sprite without
 tracking state. This has only been judged on a rendered preview, not on a
@@ -690,11 +694,12 @@ reference for shape and dimension. To be built:
   frames even-only, saucers, bullets even/odd, explosions, burning house) is
   RLE in `src/sprdata_combat.c`, linked into `m7.exe` and later spikes.
   Title, sortie, and win/lose art is even-X RLE in `src/sprdata_title.c`,
-  linked into `m9.exe`. Broderbund / Gorlin / mission / sortie banners are
-  ~1.5× from the Apple bitmaps (Broderbund clamped to 160 px) as a
+  linked into `m9.exe` and `m10.exe`. Broderbund / Gorlin / mission / sortie banners are
+  ~1.5× from the Apple bitmaps (Broderbund 1.25× so it does not fill
+  160 px) as a
   readability trial of the crushed X scale; the Choplifter logo and
   win/lose art stay aspect-correct. HUD digits and the 24×8 bubbles are
-  new art in `src/m9.c`.
+  new art in `src/m9.c` / `src/m10.c`.
   Later:
   PNG sheets, generated NASM include. Flashparty's
   `lib/repos/pcjr-flashparty-2018/tools/convert_gfx_to_bios_format.py` handles
@@ -774,6 +779,16 @@ title and sortie art (`src/sprdata_title.c`), Broderbund / logo / Gorlin
 / mission screens after the BIOS menu, and the crown / The End overlays.
 No attract loop (section 15). Title PVM music is still optional.
 
+M10 is a **compiling increment**, not a hardware GO. Five pad logs
+(same `/ztimer /batch /frames=60` command): pages 6/7 and stick 1 GO.
+Workset and Hz were flat through pre-flipped RLE (**4.00 Hz**, ~1151+1074
+bytes). Dirty-scenery restamp: restore/rle **872/851**, mountain **126**,
+sim **4.92 Hz** (74 BIOS ticks). Sheared-rotor RLE: restore still
+**872**, sprites **589→597**, **73** BIOS ticks (**4.98 Hz**); one PIT
+tick, not a win. Zen still overflowed
+(`J:\GAMES\CHOPLIJR\M10-01.LOG`). The M1 GO rates live in section 2; the live
+`M1.LOG` is gone. Section 7's ~26 ms line stays analysis. See `docs/M10.md`.
+
 ---
 
 ## 14. Risks
@@ -781,7 +796,7 @@ No attract loop (section 15). Title PVM music is still optional.
 | Risk | Severity | Mitigation |
 |---|---|---|
 | Two pages in 0–7 cannot be reserved (no JrConfig 32 KB hole, or the hole is only 16 KB) | **High** | M1 gate. First fix: JrConfig (or equivalent) as jrIDE.html specifies — 32 KB video buffer, DOS still >640 KB. Do not overlay DOS-resident pages. Fallbacks only if a hole truly cannot be had: single-page dirty-rect with retrace-timed updates, or a self-booting build that bypasses DOS. |
-| Frame budget working-set size is still analysis | **High** | Per-byte rates are measured (section 2). The ~26 ms line is not a new hardware total; M3 times real dirty-rect and blit byte counts. |
+| Frame budget working-set size is still analysis | **High** | Per-byte rates are the M1 GO table. Pad logs measured **bytes** and a **3.64 / 4.09 / 4.00 / 4.92 / 4.98 Hz** sim; the last step is one PIT tick. The Zen sample overflowed every time. Do not replace the ~26 ms line with those figures. |
 | Emulator behaviour diverges from hardware on page registers, palette timing, sound gating | Medium | Test on hardware from M1 onward. jrpiano and Foster's TODO both document specific divergences. |
 | Art overflows the memory budget | Medium | Selective pre-shifting; LZ4 the title art; reduce jet frames. |
 | Hostages unreadable at 8×11 | Medium | Deliberately widened past aspect-correct; review as soon as M2 can display them. |

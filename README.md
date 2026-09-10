@@ -30,6 +30,8 @@ port (same sim, crank-driven rope, 1-bit presentation) is specified in
 | `docs/M6.md` | milestone M6: hostages, boarding, rescue counter |
 | `docs/M8.md` | milestone M8: SN76496 effects, voice stealing |
 | `docs/M9.md` | milestone M9: HUD bubbles, title logos, sortie banners, win/lose |
+| `docs/M10.md` | milestone M10: hardware validation, optimisation, palette-effect tuning |
+| `docs/TIMINGS.md` | measured M1 rates and M10 pad logs; analysis stays labeled analysis |
 | `src/` | C driver and the NASM primitives |
 | `makefile`, `build.bat` | the build; `wmake` is the real one, the batch file is for when it misbehaves |
 | `conf/` | DOSBox-X configurations, `machine=pcjr` |
@@ -44,13 +46,13 @@ hardware. Paths for this machine are in `setenv.bat` / `setenv.ps1`. See
 and what the numbers do and do not prove.
 
 ```
-wmake            build build\m1.exe through build\m9.exe
+wmake            build build\m1.exe through build\m10.exe
 wmake run        launch M1 in DOSBox-X as a 128 KB PCjr (attended; do not start this until someone is watching)
 wmake run-batch  128 KB, /batch /nogfx, captured to build\M1.LOG
 wmake clean
 ```
 
-M2 through M9 are compile-only visuals until someone is watching. `build\m2.exe`
+M2 through M10 are compile-only visuals until someone is watching. `build\m2.exe`
 is packed `blit_mask` of the flying set. `build\m3.exe` is the sprite engine:
 `blit_rle` plus per-buffer dirty lists, same bounce and pose cycle. `build\m4.exe`
 is the scrolling world (camera lead, mountains, barracks, base, fence).
@@ -59,9 +61,10 @@ a DOSBox fallback). `build\m6.exe` is hostages: spawn, land-and-board (cap 16),
 unload at the pad, K/A/R HUD. `build\m7.exe` is combat: tanks, jets, saucers,
 bullets, house fires, explosion/sink, three sorties. `build\m8.exe` is that
 plus SN76496 effects with voice stealing (Ctrl-S mutes). `build\m9.exe` adds
-HUD bubbles, title logos, sortie-banner art, and win/lose overlays. Do not
-launch DOSBox for these without an attended visual pass. See `docs/M1.md`
-through `docs/M9.md`.
+HUD bubbles, title logos, sortie-banner art, and win/lose overlays.
+`build\m10.exe` is that game as the polish spike (hardware validation,
+optimisation, palette effects). Do not launch DOSBox for these without an
+attended visual pass. See `docs/M1.md` through `docs/M10.md`.
 
 ## Progress
 
@@ -83,7 +86,7 @@ hardware. See `docs/M1.md`.
 | M7 Combat | **compiling increment** — tanks / jets / saucers / bullets / house fire / explosion-sink / three sorties, viewer `build\m7.exe`. Attended visual pending. |
 | M8 Sound | **compiling increment** — SN76496 effects with voice stealing, viewer `build\m8.exe`. Ctrl-S mutes. Attended audio pending. |
 | M9 Presentation | **compiling increment** — HUD bubbles, title logos, sortie banners, win/lose, viewer `build\m9.exe`. Attended visual pending. |
-| M10 onwards | not started |
+| M10 Polish | **compiling increment** — five pad logs; dirty-scenery restamp **4.92 Hz**; sheared rotor RLE sprites 589→597, restore unchanged, Zen still overflowed. |
 
 Section 2's ~1500 / ~3500 / ~4600 ns/byte lines are still analysis. The
 measured video `stosw` is 2803 ns/byte (44.8 ms/screen). Do not treat an
