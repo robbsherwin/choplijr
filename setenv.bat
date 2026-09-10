@@ -43,7 +43,15 @@ rem  Needed rather than plain DOSBox: machine=pcjr is better supported, and
 rem  plain DOSBox cannot be configured down to 128 KB.  Remember that no
 rem  DOSBox models the PCjr's memory contention, so timings from here are a
 rem  smoke test and not a measurement -- see docs/M1.md.
-if "%DOSBOX%"=="" set DOSBOX=F:\_GAMES\Wizardry 6 in 7 Engine\dosbox-x.exe
+rem  Prefer the in-tree copy: it is not shared with other projects, so its
+rem  local dosbox-x.conf (automount, etc.) cannot leak into a run here.
+if "%DOSBOX%"=="" (
+  if exist "%~dp0lib\DOSBox-X\dosbox-x.exe" (
+    set DOSBOX=%~dp0lib\DOSBox-X\dosbox-x.exe
+  ) else (
+    set DOSBOX=F:\_GAMES\Wizardry 6 in 7 Engine\dosbox-x.exe
+  )
+)
 
 echo WATCOM = %WATCOM%
 echo NASM   = %NASM%

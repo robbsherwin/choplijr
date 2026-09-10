@@ -1338,22 +1338,29 @@ static void hud_draw_digit5(unsigned seg, unsigned x, unsigned d)
     }
 }
 
-/* 24x8 well, inset corners.  DESIGN.md section 6: not a scaled 43x9. */
+/* 24x8 well, inset corners.  DESIGN.md section 6: not a scaled 43x9.
+ *
+ * x0 is always even (22/68/114, the three counter slots), so six of the
+ * eight rows land on byte boundaries: row 0/7 (2px inset each side) and
+ * rows 2-5 (full width) go through fill_rect_m8 -- one far call per
+ * row-band instead of one hud_plot_px (peek_byte+poke_byte far-call pair)
+ * per pixel, cutting this bubble from ~360 far calls to ~90. Only rows 1
+ * and 6 (odd 1px inset, not byte-aligned) still plot pixel by pixel. */
 static void hud_draw_bubble(unsigned seg, unsigned x0)
 {
-    unsigned x, y, xa, xb;
+    unsigned x, y, xa, xb, xbyte0;
 
-    for (y = 0; y < HUD_ROWS; y++) {
-        if (y == 0U || y == 7U) {
-            xa = x0 + 2U;
-            xb = x0 + HUD_BUBBLE_W - 2U;
-        } else if (y == 1U || y == 6U) {
-            xa = x0 + 1U;
-            xb = x0 + HUD_BUBBLE_W - 1U;
-        } else {
-            xa = x0;
-            xb = x0 + HUD_BUBBLE_W;
-        }
+    xbyte0 = x0 / 2U;
+    fill_rect_m8(seg, xbyte0 + 1U, 0U, (HUD_BUBBLE_W - 4U) / 2U, 1U,
+                 M8_SOLID(HUD_BUBBLE));
+    fill_rect_m8(seg, xbyte0, 2U, HUD_BUBBLE_W / 2U, 4U,
+                 M8_SOLID(HUD_BUBBLE));
+    fill_rect_m8(seg, xbyte0 + 1U, 7U, (HUD_BUBBLE_W - 4U) / 2U, 1U,
+                 M8_SOLID(HUD_BUBBLE));
+
+    for (y = 1U; y <= 6U; y += 5U) {
+        xa = x0 + 1U;
+        xb = x0 + HUD_BUBBLE_W - 1U;
         for (x = xa; x < xb; x++)
             hud_plot_px(seg, x, y, HUD_BUBBLE);
     }
@@ -1493,6 +1500,19 @@ static void dirty_bbox_calc(dirty_bbox *bb, const dirty_rect *hit,
     }
 }
 
+/* Called ~36+ times per present (once per star, more via dirty_hits_box)
+ * with a small nhit each -- CLAUDE-THOUGHTS.md finding #2 found the O(n)
+ * scan itself is already cheap at this list size, so the fixed __cdecl
+ * push/pop-per-call overhead is the actual cost worth cutting here
+ * (finding #5). hit/nhit are the two fields every call site has in hand
+ * first; bb/x/y stay on the stack, same as before. modify is the full
+ * register set since the body is ordinary C, not hand-written asm -- this
+ * only removes argument-passing overhead, it does not try to keep
+ * anything alive across the call. */
+static int dirty_hits_px(const dirty_rect *hit, unsigned nhit,
+                         const dirty_bbox *bb, unsigned x, unsigned y);
+#pragma aux dirty_hits_px parm [ax] [dx] value [ax] modify [ax bx cx dx];
+
 static int dirty_hits_px(const dirty_rect *hit, unsigned nhit,
                          const dirty_bbox *bb, unsigned x, unsigned y)
 {
@@ -1515,6 +1535,14 @@ static int dirty_hits_px(const dirty_rect *hit, unsigned nhit,
     }
     return 0;
 }
+
+/* Same reasoning as dirty_hits_px above: called ~20 times per present
+ * (once per house/fence-tower/base sub-blit via box_hits_dirty), small
+ * nhit, fixed call overhead dominates. */
+static int dirty_hits_box(const dirty_rect *hit, unsigned nhit,
+                          const dirty_bbox *bb,
+                          unsigned x0, unsigned y0, unsigned x1, unsigned y1);
+#pragma aux dirty_hits_box parm [ax] [dx] value [ax] modify [ax bx cx dx];
 
 static int dirty_hits_box(const dirty_rect *hit, unsigned nhit,
                           const dirty_bbox *bb,
@@ -2011,6 +2039,16 @@ static unsigned char fire_byte(unsigned char src)
     return (unsigned char)((fire_nibble((unsigned char)(src >> 4), mix) << 4) |
                            fire_nibble((unsigned char)(src & 0x0F), mix + 1U));
 }
+
+/* Called once per opaque/mixed byte on the clipped blit fallback's row walk
+ * (blit_rle_row_clip) -- all three arguments fit in registers, so this
+ * drops the __cdecl push/pop entirely rather than just partially. src is
+ * still a full 16-bit register slot (cx), not a byte sub-register: Watcom
+ * 16-bit #pragma aux has known bugs with literal 8-bit register names
+ * (al/bl/cl) in parm clauses, so this avoids that path rather than risk
+ * silently-wrong codegen with no source-level debugger to catch it. */
+static void plot_m8_byte(unsigned seg, unsigned off, unsigned char src);
+#pragma aux plot_m8_byte parm [ax] [dx] [cx] modify [ax bx cx dx];
 
 static void plot_m8_byte(unsigned seg, unsigned off, unsigned char src)
 {
@@ -3945,23 +3983,57 @@ static int fire_tank_shell(int ti)
 static void update_tank(int i)
 {
     entity_t *e = &ents[i];
-    int dxh, scratch, si;
-    unsigned char ang, live;
+    int scratch, aim_ready, si;
+    unsigned diff;
+    unsigned char ang, live, diff_hi, diff_lo;
 
-    dxh = (int)(chop_x >> 8) - (int)(e->x >> 8);
-    if (dxh != 0 && dxh != -1 && (dxh < -2 || dxh > 2)) {
+    /* True 16-bit subtraction with borrow, matching the original's
+     * SEC/SBC pair on CHOP_POS_X/ENTITY_X -- NOT independent high-byte
+     * and low-byte subtraction, which disagrees with this exactly when
+     * chop_x and e->x straddle a 256-unit boundary. */
+    diff = (chop_x - e->x) & 0xFFFFU;
+    diff_hi = (unsigned char)(diff >> 8);
+    diff_lo = (unsigned char)diff;
+
+    if (diff_hi == 0x00U) {                 /* "under": chopper at/right, same page */
+        aim_ready = ((diff_lo & 0x80U) == 0U);
+        scratch = (int)diff_lo;
+    } else if (diff_hi == 0xFFU) {           /* "get closer": chopper at/left, same page */
+        aim_ready = ((diff_lo & 0x80U) != 0U);
+        scratch = (int)diff_lo;
+    } else if (diff_hi == 0x01U || diff_hi == 0x02U ||
+               diff_hi == 0xFDU || diff_hi == 0xFEU) {
+        aim_ready = 0;                       /* "close": one page off, idle only */
+        scratch = (int)(unsigned char)(diff_hi ^ 0x80U);
+    } else {                                 /* too far away: despawn */
         compact_ids(tank_ids, &num_tanks, (unsigned char)i);
         ent_free(i);
         return;
     }
-    scratch = (int)(unsigned char)(chop_x - e->x);
-    if (dxh != 0)
-        scratch ^= 0x80;
+    if (aim_ready)
+        scratch = (int)(unsigned char)(scratch + 0x80);
+
     if (dying) {
         tank_burst_left[i] = 0;
         tank_burst_wait[i] = 0;
         tank_burst_shot[i] = (unsigned char)TANK_SHOT_NONE;
         if ((scratch & 0x80) == 0) {
+            if (e->x > 4U)
+                e->x -= 4U;
+            e->vy = (signed char)0xFC;
+        }
+        return;
+    }
+    if (!aim_ready) {
+        /* Not lined up on the chopper's page yet, or facing the wrong
+         * way -- move toward the chopper, same as the original's
+         * updateTankGoLeft (bit 7 set means the chopper is to the
+         * right, by construction of the diff/scratch math above). No
+         * aim swivel or firing this tick. */
+        if ((scratch & 0x80) != 0) {
+            tank_step_right(e);
+            e->vy = 4;
+        } else {
             if (e->x > 4U)
                 e->x -= 4U;
             e->vy = (signed char)0xFC;
@@ -4997,9 +5069,12 @@ static void sim_tick(void)
             next_sortie();
     }
     if (end_kind == 0U) {
+        /* choplifter.s:599-608: win is TOTAL_RESCUES==64; otherwise the
+         * game ends (loss) once TOTAL_RESCUES+HOSTAGES_KILLED==64 -- all
+         * 64 hostages processed, not 64 killed outright. */
         if (total_rescues >= 64U)
             end_kind = 1;
-        else if (hostages_killed >= 64U)
+        else if ((unsigned)total_rescues + (unsigned)hostages_killed >= 64U)
             end_kind = 2;
         if (end_kind != 0U)
             end_left = (unsigned char)END_TICKS;
@@ -5508,6 +5583,17 @@ static unsigned long ph_sim, ph_present, ph_flip, ph_idle;
 /* present's own five natural sub-phases; should sum to ~ph_present. */
 static unsigned long ph_restore, ph_mountain, ph_scenery, ph_sprites, ph_hud;
 
+/* Combat-window phase totals: the same eight counters above, but only for
+ * sim ticks classified as "combat" (see combat_tick_p below).  Every
+ * /phases capture so far has been the static empty pad -- these exist so a
+ * real firefight (tank + hostages + chopper on screen) can be measured
+ * separately from an otherwise-quiet flight, instead of one run-wide
+ * average diluting whatever the combat cost actually is. */
+static unsigned long cph_sim, cph_present, cph_flip, cph_idle;
+static unsigned long cph_restore, cph_mountain, cph_scenery, cph_sprites,
+                      cph_hud;
+static unsigned long combat_ticks;
+
 static unsigned long bios_ticks(void)
 {
     unsigned lo, hi, lo2;
@@ -5589,6 +5675,25 @@ static int show_presentation(void)
     return 1;
 }
 
+/* Approximate "chopper, tank and hostages on screen together": at least
+ * one live tank plus at least one spawned (not yet boarded/rescued/HST_FREE)
+ * hostage.  This is existence, not a screen-rectangle overlap check -- the
+ * chopper is the player and always present, and in practice a live tank and
+ * a spawned hostage are usually visible together or a few chopper-lengths
+ * apart, so it is a reasonable proxy for "a firefight is happening" without
+ * the cost or complexity of real on-screen bounds checks every tick. */
+static int combat_tick_p(void)
+{
+    unsigned h;
+
+    if (num_tanks == 0U)
+        return 0;
+    for (h = 0; h < MAX_HOSTAGES; h++)
+        if (hostage_anim[h] != HST_FREE)
+            return 1;
+    return 0;
+}
+
 static void run_viewer(void)
 {
     unsigned long t0;
@@ -5597,6 +5702,10 @@ static void run_viewer(void)
     unsigned   back_seg;
     unsigned   i;
     unsigned   limit;
+    int        in_combat = 0;  /* combat_tick_p() as of the last sim tick;
+                                 * also read on the two idle retraces
+                                 * between sim ticks, so cph_idle reflects
+                                 * the state those retraces were waiting on. */
 
     paint_world(seg_a);
     paint_world(seg_b);
@@ -5628,6 +5737,9 @@ static void run_viewer(void)
     ws_reset();
     ph_sim = ph_present = ph_flip = ph_idle = 0UL;
     ph_restore = ph_mountain = ph_scenery = ph_sprites = ph_hud = 0UL;
+    cph_sim = cph_present = cph_flip = cph_idle = 0UL;
+    cph_restore = cph_mountain = cph_scenery = cph_sprites = cph_hud = 0UL;
+    combat_ticks = 0UL;
 
     crt_page = page_b;
     set_pages(page_b, page_a);
@@ -5672,9 +5784,14 @@ static void run_viewer(void)
             if (opt_phases)
                 tp0 = bios_ticks();
             sim_tick();
+            in_combat = opt_phases && combat_tick_p();
             if (opt_phases) {
                 tp1 = bios_ticks();
                 ph_sim += tp1 - tp0;
+                if (in_combat) {
+                    cph_sim += tp1 - tp0;
+                    combat_ticks++;
+                }
                 t_simend = tp1;         /* present's span starts here; tp0/
                                          * tp1 are reused below as rolling
                                          * checkpoints for the sub-phases. */
@@ -5704,6 +5821,8 @@ static void run_viewer(void)
             if (opt_phases) {
                 tp0 = bios_ticks();
                 ph_restore += tp0 - tp1;
+                if (in_combat)
+                    cph_restore += tp0 - tp1;
             }
 
             /* Static camera and nothing erased over the ridge: the band on
@@ -5725,6 +5844,8 @@ static void run_viewer(void)
             if (opt_phases) {
                 tp1 = bios_ticks();
                 ph_mountain += tp1 - tp0;
+                if (in_combat)
+                    cph_mountain += tp1 - tp0;
             }
 
             if (full_sc) {
@@ -5752,6 +5873,8 @@ static void run_viewer(void)
             if (opt_phases) {
                 tp0 = bios_ticks();
                 ph_scenery += tp0 - tp1;
+                if (in_combat)
+                    cph_scenery += tp0 - tp1;
             }
 
             draw_ents(back_seg, &lists[back]);
@@ -5763,6 +5886,8 @@ static void run_viewer(void)
             if (opt_phases) {
                 tp1 = bios_ticks();
                 ph_sprites += tp1 - tp0;
+                if (in_combat)
+                    cph_sprites += tp1 - tp0;
             }
 
             if (do_z) {
@@ -5786,6 +5911,10 @@ static void run_viewer(void)
                                                  * ph_restore + ph_mountain +
                                                  * ph_scenery + ph_sprites +
                                                  * ph_hud. */
+                if (in_combat) {
+                    cph_hud += tp0 - tp1;
+                    cph_present += tp0 - t_simend;
+                }
             }
 
             vid_wait_retrace();
@@ -5795,6 +5924,8 @@ static void run_viewer(void)
             if (opt_phases) {
                 tp1 = bios_ticks();
                 ph_flip += tp1 - tp0;
+                if (in_combat)
+                    cph_flip += tp1 - tp0;
             }
 
             back = !back;
@@ -5804,8 +5935,13 @@ static void run_viewer(void)
             if (opt_phases)
                 ti0 = bios_ticks();
             vid_wait_retrace();
-            if (opt_phases)
-                ph_idle += bios_ticks() - ti0;
+            if (opt_phases) {
+                unsigned long dt = bios_ticks() - ti0;
+
+                ph_idle += dt;
+                if (in_combat)
+                    cph_idle += dt;
+            }
         }
 
         if (kbd_is_down(SCAN_ESC)) {
@@ -5844,8 +5980,9 @@ static void usage(void)
 "  /forcefire   debug: every in-bounds blit takes blit_rle_m8_fire\n"
 "  /noworkset   debug: skip WORKSET/ZTIMER byte counting (prints as 0)\n"
 "  /phases      debug: bios_ticks() phase breakdown (sim_tick/present/flip/\n"
-"               idle, plus present's 5 sub-phases).  Off by default -- this\n"
-"               instrumentation has a real per-tick cost otherwise.\n"
+"               idle, plus present's 5 sub-phases), for the whole run and\n"
+"               again for ticks with a tank+hostage on screen.  Off by\n"
+"               default -- real per-tick cost otherwise.\n"
 "  /?           this\n"
 "\n"
 "Stick: Paku Paku 1.6a port 201h loop (CLI, bits high, timeout 7FFFh).\n"
@@ -6113,6 +6250,28 @@ static void capture_stick_rest(int verbose)
         printf("  rest stick 1 %u,%u (%u)\n", stick_cx0, stick_cy0, n0);
 }
 
+/* Shared by the whole-run and combat-window /phases tables below: printing
+ * the same five lines twice from two literal printf call sites would double
+ * their format-string CONST cost for no reason (CLAUDE-THOUGHTS.md already
+ * paid for that lesson once with verbose diagnostic text). */
+static void print_phase_table(unsigned long ps, unsigned long pp,
+                              unsigned long pf, unsigned long pi,
+                              unsigned long pr, unsigned long pm,
+                              unsigned long psc, unsigned long psp,
+                              unsigned long ph)
+{
+    printf("  sim_tick %5lu (%5lu ms)   present %5lu (%5lu ms)\n",
+           ps, bios_ticks_to_ms(ps), pp, bios_ticks_to_ms(pp));
+    printf("  flip     %5lu (%5lu ms)   idle    %5lu (%5lu ms)\n",
+           pf, bios_ticks_to_ms(pf), pi, bios_ticks_to_ms(pi));
+    printf("  restore  %5lu (%5lu ms)   mountain %5lu (%5lu ms)\n",
+           pr, bios_ticks_to_ms(pr), pm, bios_ticks_to_ms(pm));
+    printf("  scenery  %5lu (%5lu ms)   sprites  %5lu (%5lu ms)\n",
+           psc, bios_ticks_to_ms(psc), psp, bios_ticks_to_ms(psp));
+    printf("  hud      %5lu (%5lu ms)   sub-sum  %5lu (present %5lu)\n",
+           ph, bios_ticks_to_ms(ph), pr + pm + psc + psp + ph, pp);
+}
+
 int main(int argc, char **argv)
 {
     unsigned char model;
@@ -6252,23 +6411,28 @@ int main(int argc, char **argv)
         unsigned long ph_sum = ph_sim + ph_present + ph_flip + ph_idle;
 
         printf("\nPHASE ticks (BIOS, sum over run; ms approx):\n");
-        printf("  sim_tick %5lu (%5lu ms)   present %5lu (%5lu ms)\n",
-               ph_sim, bios_ticks_to_ms(ph_sim),
-               ph_present, bios_ticks_to_ms(ph_present));
-        printf("  flip     %5lu (%5lu ms)   idle    %5lu (%5lu ms)\n",
-               ph_flip, bios_ticks_to_ms(ph_flip),
-               ph_idle, bios_ticks_to_ms(ph_idle));
+        print_phase_table(ph_sim, ph_present, ph_flip, ph_idle,
+                          ph_restore, ph_mountain, ph_scenery, ph_sprites,
+                          ph_hud);
         printf("  sum %lu vs run_bios_ticks %lu\n", ph_sum, run_bios_ticks);
-        printf("  restore  %5lu (%5lu ms)   mountain %5lu (%5lu ms)\n",
-               ph_restore, bios_ticks_to_ms(ph_restore),
-               ph_mountain, bios_ticks_to_ms(ph_mountain));
-        printf("  scenery  %5lu (%5lu ms)   sprites  %5lu (%5lu ms)\n",
-               ph_scenery, bios_ticks_to_ms(ph_scenery),
-               ph_sprites, bios_ticks_to_ms(ph_sprites));
-        printf("  hud      %5lu (%5lu ms)   sub-sum  %5lu (present %5lu)\n",
-               ph_hud, bios_ticks_to_ms(ph_hud),
-               ph_restore + ph_mountain + ph_scenery + ph_sprites + ph_hud,
-               ph_present);
+
+        /* Same counters, only for sim ticks a tank and a spawned hostage
+         * both existed (combat_tick_p) -- does a firefight's cost shape
+         * differ from the whole-run average above? combat_ticks counts sim
+         * ticks, the sample size behind this table, not BIOS ticks. */
+        if (combat_ticks != 0UL) {
+            unsigned long cph_sum = cph_sim + cph_present + cph_flip +
+                                     cph_idle;
+
+            printf("\nCOMBAT ticks (%lu/%u sim ticks, tank+hostage on "
+                   "screen):\n", combat_ticks, run_sim_ticks);
+            print_phase_table(cph_sim, cph_present, cph_flip, cph_idle,
+                              cph_restore, cph_mountain, cph_scenery,
+                              cph_sprites, cph_hud);
+            printf("  sum %lu\n", cph_sum);
+        } else {
+            printf("\nCOMBAT ticks: none this run.\n");
+        }
     }
     print_workset();
     if (opt_stick) {

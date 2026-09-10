@@ -200,6 +200,38 @@ This changes core combat balance/feel, not just a rendering bug, so:
 
 ## Status
 
-Diagnosed, not yet implemented. Pick up here: write the patch above,
-build, and validate against the original source once more before testing
-in DOSBox-X / on hardware.
+Implemented in `update_tank()` (`src/m10.c:3945`), 2026-09-10. Builds
+clean with `wmake` (no new warnings).
+
+The implementation differs from the rough pseudocode above in one way:
+`scratch` is now computed as a valid raw value (diff_lo, or
+`diff_hi ^ 0x80` in the "close" case) in *every* non-despawn branch, not
+just the `aim_ready` ones, and only gets the `+0x80` readiness bump when
+`aim_ready` is true. This was needed so the idle path has a real value to
+test — traced from `updateTankGoLeft`/`updateTankGoLeft2` in
+`choplifter.s:4420-4427`, which use the *unadjusted* `ZP_SCRATCH64` (bit 7
+only) to decide whether to step right or left while not aiming. That idle
+fallback ("Need to check what the port currently uses for that idle
+case," from the original writeup) is now implemented directly in
+`update_tank()` as an `if (!aim_ready) { ...; return; }` block, gating
+both the movement-decision and aim-swivel/fire blocks in one early
+return, matching the original's control flow (`updateTankDeathCheck` →
+`updateTankGoLeft`/`updateTankGoLeft2` → `rts`, never reaching
+`updateTankReadyToMove`/`updateTankActionChosen`).
+
+The pre-existing top-of-function `dying`-global short-circuit block was
+left untouched, per the stated scope — it does not correspond 1:1 to the
+original's `ZP_DYING` handling (which, in the `aim_ready` case, still
+swivels the cannon via `updateTankSkip`/`updateTankActionChosen` while
+suppressing fire, rather than returning immediately), but reconciling
+that is a separate, un-scoped change.
+
+Also fixed as a side effect of the correct three-way classification: the
+despawn range was off by one on the negative side (previously despawned
+at `diff_hi == 0xFD`/-3 pages, which the original's "close" case treats
+as alive-but-idle; the corrected branching keeps `{0xFD, 0xFE, 0x00, 0xFF,
+0x01, 0x02}` alive, matching `choplifter.s:4251-4262`).
+
+Not yet validated against real play — needs a DOSBox-X / hardware pass
+(stationary chopper, single tank at a known offset, count ticks to first
+shell and whether it lands on-target) before this is considered done.

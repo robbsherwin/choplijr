@@ -423,6 +423,39 @@ reading the code. This is still an emulator number and does not belong in
 `docs/TIMINGS.md`; the real question is whether `-ot` moves the hardware Hz at
 all, which only a PCjr pad run answers.
 
+**Applied.** `makefile`'s `CFLAGS` now uses `-ot` in place of `-os` for every
+module (2026-09-10) — this was tested and left uncommitted for a while;
+nothing else changed. Re-checked the DGROUP-margin concern from the section
+above (this codebase's small-model near-data segment was down to a
+previously-recovered 1,504-byte margin) since `-ot` trades size for speed and
+the earlier scare was exactly a size regression eating that margin: `m10.map`
+shows DGROUP at `0xfb10` (64,272 B) vs `0xfb00` (64,256 B) before, a **16-byte**
+growth, even though `m10.exe` itself grew by about 1,250 bytes. The two flags
+mostly move code-segment size, which small-model DOS puts outside `DGROUP`;
+the near-data segment barely felt it. Margin to the 64 KB cap after this
+change: **1,264 bytes**.
+
+**Confirmed on real hardware, `docs/claude-logs/M10-03.LOG`.** 69→61 BIOS
+ticks, 5.27→5.97 Hz — **+13.3%**, bigger than the DOSBox-X prediction
+(+3.7%). All byte counts identical to `M10-02.LOG`. Worth keeping.
+
+This same log carried `/phases` for the first time, finally answering "what
+I'd do next" step 2 below: **`present` is 65.6% of the frame, `sim_tick`
+9.8%, `flip` 8.2%, `idle` 16.4%.** The draw path dominates, game logic
+doesn't — this document's central hypothesis, now with a real number behind
+it instead of a code-reading argument. Inside `present`: `sprites` 37.5%,
+`restore` and `hud` tied at 22.5% each, `scenery` 12.5%, `mountain` 5%.
+`sprites` leading supports finding #5's per-call-overhead hypothesis for
+the blit hot path. `hud` tying `restore` is new and NOT explained by
+anything in this document — `draw_hud()` (`src/m10.c:1403`) already has a
+per-page dirty check that should make 18 of this run's 20 ticks near-free
+once both video pages have painted the (unchanging, in this static scene)
+counters once. Whether that's two genuinely expensive first-draws or the
+dirty check not skipping as often as intended is not yet distinguished; a
+run-summed BIOS-tick total can't tell those apart, only a per-tick count
+can. Worth resolving before spending effort on finding #5, since if it's
+the latter, it's a cheap, high-value fix in its own right.
+
 ### 5. Every hot-path call pays full stack-based `__cdecl` overhead — medium confidence, larger effort
 
 `pcjr.h`'s header comment already names this as a known, deferred trade-off:
@@ -446,6 +479,45 @@ the handful of functions actually called per-star/per-sprite/per-row
 (`dirty_hits_px`, `dirty_hits_box`, `sky_grad_mix`, `plot_m8_byte`) rather than
 the whole codebase — the ROI is concentrated in a small set of tiny, hot,
 frequently-called functions, not spread evenly.
+
+**Tried, partially — `sky_grad_mix` dropped from this list first.** By the
+time this item came up, finding #3 had already cut `sky_grad_mix`'s call
+count from once-per-pixel-pair-per-row to 108 calls for the game's entire
+lifetime (a precomputed table replaced the per-call math). Applying a
+register calling convention to a function called 108 times total isn't
+worth the risk, so it's excluded. `blit_at`'s own dispatch (mentioned in
+passing when this was revisited after `sprites` showed up as the largest
+`present` sub-phase) was also excluded on inspection: it's a branchy
+dispatcher that calls into `blit_rle_m8`/`blit_rle_clip`, not a small leaf
+— exactly the shape this technique doesn't suit, and a poor fit for
+hand-picking a register/`modify` set with confidence.
+
+Applied `#pragma aux ... parm [...] value [...] modify [ax bx cx dx]` to
+the three that remained genuine hot leaves: `dirty_hits_px` (hit→`ax`,
+nhit→`dx`, rest on the stack), `dirty_hits_box` (same two), and
+`plot_m8_byte` (all three params — `seg`→`ax`, `off`→`dx`, `src`→`cx` as a
+full 16-bit slot, not a byte sub-register: Open Watcom 16-bit has a known
+bug with literal 8-bit register names like `al`/`bl`/`cl` in `parm`
+clauses, and this has no source-level debugger to catch a silent
+miscompile if that bug were hit). `modify` is left as the full
+general-purpose set on all three since the bodies are ordinary
+compiler-generated C, not hand-written asm — the point is only to remove
+argument push/pop overhead, not to keep anything alive across the call.
+
+Verified correct (DOSBox-X, static pad scene, `/phases`): WORKSET byte
+counts identical (872/859/1763, mountain 126/scenery 167/sprites 597) to
+every prior cut, across four repeated runs. **No measurable speedup on this
+scene**: total BIOS ticks landed at 65 in every run, matching the pre-change
+HUD-fix baseline exactly, with `present`/`sprites`/`sim_tick` bouncing by
+±1 tick run-to-run the same way they did before this change — ordinary
+DOSBox-X timer jitter, not a regression or a win. Consistent with finding
+#2's own conclusion: this specific static, no-scrolling, no-combat scene
+has a small dirty list and rarely reaches the clipped-blit fallback
+(`plot_m8_byte`'s only caller), so there isn't much fixed call overhead
+here to remove in the first place. Whether this helps in a denser scene
+(scrolling, combat, more dirty rects, more clipped edge blits) is untested
+— kept because it is verified byte-identical and free (zero DGROUP cost),
+the same disposition finding #2's bbox pre-check got.
 
 ### 6. The joystick's CLI-protected counting loop is a real-but-currently-mitigated risk — low confidence for *this* log, worth knowing about
 
@@ -472,35 +544,163 @@ invisible to every log gathered so far by construction.
 `snd_tick`) has never been measured at all, only inferred from `(BIOS ticks −
 present ticks)`.
 
+### 7. `draw_hud`'s counter bubbles plot one pixel at a time — confirmed and fixed
+
+`M10-03.LOG`'s `/phases` breakdown showed `hud` tied `restore` at 22.5% of
+`present`, surprising for a static scene where the hostage counters never
+change and `draw_hud()` (`src/m10.c:1403`) already has a per-page dirty
+check meant to skip the redraw once each of the two video pages has painted
+the (unchanging) counters once.
+
+Traced it: the dirty check is correct, not the problem. Over a 20-sim-tick
+run, `back` (the page index) toggles 0/1/0/1.../ each tick
+(`src/m10.c:5837`), so exactly 2 of the 20 ticks (one per page) do a real
+redraw and the other 18 hit the early-return. The cost is concentrated in
+those 2 real draws, and it's the same bug class as finding #1: `hud_draw_bubble()`
+plotted its 24x8 counter well **one pixel at a time** via `hud_plot_px()` →
+`peek_byte()`/`poke_byte()` (`src/m10.c:1229`), both `__cdecl` far calls
+(`pcjr.h:256/258`) — the identical per-call overhead finding #1 already
+named as expensive, just in the HUD renderer instead of the sprite blitter.
+~180 pixels x 2 far calls per bubble, x3 bubbles (killed/loaded/rescued) x2
+real draws (both pages) is on the order of 2,500+ far calls concentrated
+into 2 of the run's 20 ticks — consistent with a lopsided per-tick cost a
+run-summed total can't see directly, but a two-run isolation (see below)
+confirms.
+
+**Fixed.** `hud_draw_bubble`'s x0 is always even (22/68/114, the three
+counter slots), so 6 of its 8 rows land on byte boundaries: row 0/7 (2px
+inset each side, byte-aligned since the inset is even) and rows 2-5 (full
+24px width) now go through `fill_rect_m8` — the same fast assembly
+rectangle-fill dirty-rect restore already uses — one far call per row-band
+instead of one `hud_plot_px` far-call pair per pixel. Only rows 1 and 6 (an
+odd 1px inset, not byte-aligned) still plot pixel by pixel, about 90 far
+calls left out of the original ~360 per bubble.
+
+Isolated exactly like findings #1-#3: rebuilt with the fix reverted, ran the
+same DOSBox-X smoke test (`/force /ztimer /phases /batch /frames=60`,
+static pad scene), then rebuilt with the fix restored and re-ran. **69→65
+BIOS ticks (5.27→5.60 Hz)**, `hud` 9→3 ticks (494→165 ms, a 67% cut),
+`present` 50→46. WORKSET byte counts identical in both runs (872/859/1763,
+mountain 126/scenery 167/sprites 597) — same pixels, only how they're drawn
+changed.
+
+**Confirmed on real hardware, `docs/claude-logs/M10-04.LOG`.** Same command
+as `M10-03.LOG` (the pre-fix baseline, already carrying `-ot`): **61→56
+BIOS ticks, 5.97→6.50 Hz (+8.9%)**, `hud` 9→4 BIOS ticks (494→220 ms) —
+smaller than the DOSBox-X isolation's 9→3 but the same direction and order
+of magnitude. Byte counts identical (872/859/1763, mountain 126/scenery
+167/sprites 597). `sim_tick` (6→3), `idle` (10→13) and `flip` (5→3) also
+moved a few ticks on this run; none of those phases were touched by this
+fix, so read that as ordinary jitter on a ~1 s real-hardware sample, not a
+second effect.
+
 ## What I'd do next, in order
 
-1. **Rebuild with `-ot` instead of `-os` and re-run the exact same pad
-   command.** Zero source changes, five minutes, and it's a real hardware
-   number either way.
-2. **Stop trying to fit the present inside the Zen timer's 54 ms window and
-   measure the phases separately with `bios_ticks()` deltas instead** — coarse
-   (18.2 Hz / ~55 ms resolution) but it doesn't overflow, and it can bracket
-   `sim_tick()` vs. `present()` vs. the idle `vid_wait_retrace()` loop
-   independently. Right now nobody knows the actual split between "physics and
-   AI," "restore and draw," and "waiting on hardware," and every optimisation
-   so far has been aimed at only one of those three, unconfirmed to even be the
-   largest one on this hardware. That is the single most useful thing to add to
-   `docs/TIMINGS.md` before spending more effort on byte-level blit tuning.
-3. **Separate "clipped/fire-path bytes" from "fast-path bytes" in the WORKSET
-   counters** (finding #1) so the existing instrumentation can see the problem
-   it's currently blind to.
-4. **Add a cheap bounding-box pre-check to `dirty_hits_px`/`dirty_hits_box`**
-   (finding #2) — small, local, testable against the existing WORKSET/Hz
-   numbers without touching the rendering itself.
-5. **Precompute the sky-gradient row table** (finding #3) — same shape of
-   change as `sky_rowpat[]` already does, just moved earlier.
-6. Only after 1–5: revisit `#pragma aux` for the specific hot leaf functions
-   named in finding #5, since that's the most invasive change and the one
-   whose payoff is hardest to predict without the phase-split measurement from
-   step 2 telling you it's still worth it.
+Status (2026-09-10): every item below has now been tried. 1, 2, 4 (this
+session's HUD fix) are hardware-confirmed wins. 5 and 7 (bbox pre-check,
+`#pragma aux`) were tried and verified correct but showed no measurable win
+on the static pad scene — both kept as free, harmless, untested-in-denser-
+scenes. 6 is done. 3 was superseded (no longer needed once finding #1 was
+actually fixed). Nothing is left un-investigated from this list; the next
+open question is what a scrolling/combat scene's phase breakdown looks
+like, not another item from this list.
 
-Everything above is a reading of the source plus well-established 8088 timing
+1. ~~Rebuild with `-ot` instead of `-os`.~~ **Done, hardware-confirmed:**
+   +13.3% (`M10-03.LOG`).
+2. ~~Measure the phases separately with `bios_ticks()` deltas.~~ **Done,
+   hardware-confirmed:** `present` is 65.6% of the frame, `sim_tick` 9.8%
+   (`M10-03.LOG`, `docs/TIMINGS.md`). The draw path is confirmed as the
+   target, not game logic.
+3. ~~Separate clipped/fire-path bytes from fast-path bytes in the WORKSET
+   counters (finding #1).~~ **Superseded, not needed.** The actual fix
+   (`blit_rle_m8_fire`, an assembly fire-remap that stays on the fast path)
+   made the byte-count blind spot moot — fire sprites are counted correctly
+   by the same return-value mechanism as everything else now (see finding
+   #1's "Fixed, the zero-storage way" note above); `blit_rle_clip` is only
+   reached for genuine edge-of-screen clipping.
+4. ~~Find out whether `hud`'s 22.5%-of-`present` share (`M10-03.LOG`) is two
+   expensive first-draws or the dirty check not skipping as often as it
+   should.~~ **Done (finding #7): the dirty check is fine, the cost was
+   `hud_draw_bubble`'s per-pixel far calls.** Fixed with `fill_rect_m8`;
+   DOSBox-X isolation showed `hud` cut 9→3 ticks (67%), `present` 50→46.
+   **Hardware-confirmed, `M10-04.LOG`:** `hud` 9→4, run total 61→56
+   (5.97→6.50 Hz, +8.9%), byte counts identical.
+5. ~~Add a bounding-box pre-check to `dirty_hits_px`/`dirty_hits_box`
+   (finding #2).~~ **Tried, did not help on the static pad scene (kept,
+   harmless, may help in denser scenes — untested there).**
+6. ~~Precompute the sky-gradient row table (finding #3).~~ **Done:** ~2.4%
+   on the DOSBox-X pad log, byte-identical output.
+7. ~~`#pragma aux` for the hot leaf functions named in finding #5.~~ **Done
+   for `dirty_hits_px`/`dirty_hits_box`/`plot_m8_byte`** (`sky_grad_mix`
+   dropped — finding #3 already made it cold; `blit_at`'s dispatch dropped —
+   not a small leaf, poor fit for hand-picked registers). **Verified
+   correct, no measurable win**: byte-identical WORKSET across 4 DOSBox-X
+   runs, total ticks unchanged from the pre-change baseline within normal
+   jitter. Kept (free, zero DGROUP cost) pending a denser/scrolling/combat
+   benchmark or a real hardware pass to see if it moves anything there.
+
+Everything above except the two hardware-confirmed items (`-ot`, the HUD
+fix) is still a reading of the source plus well-established 8088 timing
 facts (DIV is slow, far calls aren't free, unindexed linear scans cost what
-they cost), not a new hardware measurement. Steps 1 and 2 are cheap enough to
-run on the next hardware pass and would turn most of this document from
-"plausible reading" into "confirmed," one way or the other.
+they cost) validated only against the DOSBox-X smoke test, not real
+hardware. The `#pragma aux` item above is the first one where the DOSBox-X
+smoke test itself came back negative (no measured change) rather than
+positive-but-emulator-only — worth remembering before spending more effort
+generalizing this technique to other functions.
+
+## Combat-window measurement (2026-09-10)
+
+Every `/phases` capture in this document is the static pad scene: 0 tanks,
+0 hostages, chopper parked. That scene told us `present` dominates
+`sim_tick` overall, but it cannot say anything about combat specifically --
+`update_tank`'s AI, hostage AI, more entities in `draw_ents`, more dirty
+rects. The `#pragma aux` result above is a concrete example of why that
+gap matters: it targeted functions whose call frequency was reasoned about
+from the code, not measured in the scene that would actually exercise them
+densely, and it needs `plot_m8_byte` (the clipped-blit fallback) called
+enough to matter, which a static, no-combat scene doesn't force at all.
+
+`/phases` now also tracks a second set of the same eight counters, gated on
+`combat_tick_p()` (`src/m10.c`, next to `run_viewer`): a sim tick counts as
+"combat" if a tank is alive and at least one hostage is spawned. This is an
+existence check, not a screen-rectangle overlap test -- deliberately simple,
+since the chopper is the player and is always on screen, and a live tank
+plus a spawned hostage are usually nearby each other in practice. Printed
+as a "COMBAT ticks" table after the existing whole-run one, or "COMBAT
+ticks: none this run" if the flight never reached one. Needs an attended
+run (`M10 /force /phases`, fly into a fight, then Esc) -- `/batch
+/frames=60` never leaves the pad, so it will always read zero. Verified on
+the static pad smoke test: correctly reports zero combat ticks, whole-run
+table numbers unaffected, DGROUP cost minimal (a shared `print_phase_table`
+helper avoids paying for the format strings twice -- 1,056 bytes of margin
+left of the 64 KB cap after this addition, down from 1,264 before it, of
+which most of that delta is the ten new `unsigned long`/`unsigned`
+counters, not the printf text). `/force` is emulator-only (bypasses the
+BIOS model-byte check DOSBox-X fails); real hardware just needs
+`M10 /phases`.
+
+**Run in an actual firefight, `docs/claude-logs/M10-05.LOG`.** Real PCjr,
+attended, 381 sim ticks, 316 (83%) classified combat, 268 involved
+scrolling. The result: combat does not shift the cost profile.
+`sim_tick`/`present`/`flip`/`idle` land within a point of each other
+whole-run vs. combat-window (8.2% vs 8.7%, 60.4% vs 58.5%, etc.) — see
+`docs/TIMINGS.md` for the full table. `sim_tick` (all of `update_tank`,
+`update_hostages`, physics, collision) stays ~8% in this real flight, same
+order of magnitude as the static pad scene (6-10%, M10-03/04). Three
+different scenes now agree on this. **This closes the question that
+started this section: entity-AI C code is not a productive assembly-
+conversion target for combat** — it was never more than a tenth of the
+frame, combat or not.
+
+What this run actually shows moving is scrolling, not combat: `mountain`
+jumped from 5% of `present` (static) to 28.2% here, `restore` from 22.5%
+to 30.5% — both driven by `shift != last_shift` parallax retiling and
+bigger dirty rects while the camera is moving (268/381 ticks), not by
+entity count. `hud` fell to 1.6% (vs 22.5% static), confirming the HUD fix
+lands even better in real play than the static number suggested. `sprites`
+is still meaningful (26.0%) but is no longer alone at the top the way the
+static scene made it look (37.5%) — mountain and restore now take a bigger
+bite once scrolling is real. If there's a next present-side target worth
+hand-optimizing, this data points at the mountain-retile and dirty-rect-
+restore C orchestration around the existing `fill_rect_m8`/`blit_rle_m8`
+assembly, not entity AI.

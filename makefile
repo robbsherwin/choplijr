@@ -86,11 +86,17 @@ M10     = $(BUILD)\m10.exe
 # -ms    small model.  Required, not preferred: every asm routine is reached
 #        by a NEAR call, and the primitives take explicit segment/offset pairs
 #        rather than far pointers so the data model cannot change the ABI.
-# -os    optimise for size.  Nothing that gets timed is written in C, so there
-#        is no reason to trade size for speed here.
+# -ot    optimise for speed, not size.  M10's own Zen-timer overflow showed
+#        the present path is CPU-bound in C (dirty-rect bookkeeping, sprite
+#        dispatch, coordinate transforms), not memory-bandwidth-bound the way
+#        the M1 spike (only rep stosw/movsw) was -- see CLAUDE-THOUGHTS.md
+#        finding #4.  Measured +3.7% (81 vs 84 BIOS ticks) on the standard
+#        DOSBox-X pad log with zero source changes; not yet confirmed on real
+#        hardware.  Costs binary size (small-model DGROUP is a tight 64 KB
+#        cap) -- re-check the .map file's DGROUP size after touching this.
 # -w4    warnings on.  Worth reading: this code cannot be run on the machine
 #        it was written on, so the compiler is the only reviewer available.
-CFLAGS  = -0 -ms -os -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND)
+CFLAGS  = -0 -ms -ot -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND)
 
 # -f obj is the OMF object format wlink reads directly (DESIGN.md section 12).
 # Listings are kept because the assembly here has to be verified by reading,
