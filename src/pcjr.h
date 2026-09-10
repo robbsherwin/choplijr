@@ -202,6 +202,17 @@ void __cdecl blit_mask_m8(unsigned dseg, unsigned xbyte, unsigned y,
 void __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
                          unsigned sseg, unsigned soff);
 
+/* M10: same as blit_rle_m8, but every stored byte is passed through
+ * fire_tab (an XLATB lookup) first -- the yellow-to-fire recolour m10.c's
+ * fire_byte()/fire_nibble() do in C, fixed for blit_fire == 1 (the only
+ * value it is ever called with).  The remap never changes which nibbles are
+ * transparent, so the row structure and REP-vs-RMW split are identical to
+ * blit_rle_m8; an opaque run just can't be REP MOVSB since each byte needs
+ * the table lookup.  Not a clipped blitter -- same edge-of-screen caveat as
+ * blit_rle_m8. */
+void __cdecl blit_rle_m8_fire(unsigned dseg, unsigned xbyte, unsigned y,
+                              unsigned sseg, unsigned soff);
+
 /* DGROUP segment.  Small-model near pointers are offsets from this. */
 unsigned __cdecl data_seg(void);
 

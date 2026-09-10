@@ -136,6 +136,16 @@ static int      stick_force     = 0;        /* 0 auto, 1 port201, 2 int15 */
 static unsigned opt_frames      = 0;        /* 0 = until Esc */
 static unsigned opt_ztimer      = 0;        /* sim_frame to sample; 0 = off */
 static unsigned opt_retrace     = 0;        /* retrace-probe length; 0 = off */
+static int      opt_forceclip   = 0;        /* debug: every blit_at takes
+                                              * blit_rle_clip, not blit_rle_m8.
+                                              * Not a real mode -- isolates the
+                                              * fast-vs-slow blit path cost. */
+static int      opt_forcefire   = 0;        /* debug: every in-bounds blit_at
+                                              * takes blit_rle_m8_fire, as if
+                                              * blit_fire were set, without
+                                              * touching real game state.
+                                              * Not a real mode -- isolates
+                                              * the fire-remap fast path. */
 
 #define RETRACE_DEFAULT 180U            /* 3 s if a field costs one field */
 
@@ -1008,6 +1018,10 @@ static const unsigned char bayer_4x4[16] = {
 
 #define SKY_GRAD_N      2
 
+/* Both bands together span 30 + 24 rows (section 4's row map).  32 is a
+ * power of 2 so the table index below is a shift, not a multiply. */
+#define SKY_GRAD_MAXROWS 32
+
 static const sky_gradient sky_grads[SKY_GRAD_N] = {
     { (unsigned char)SKY_DARK_Y0, (unsigned char)SKY_DARK_Y1,
       SKY_C_BLACK, SKY_C_DARK, bayer_4x4 },
@@ -1015,18 +1029,21 @@ static const sky_gradient sky_grads[SKY_GRAD_N] = {
       SKY_C_DARK,  SKY_C_HAZE, bayer_4x4 }
 };
 
-static const sky_gradient *sky_grad_find(unsigned y)
+/* SKY_GRAD_N (2) on no match, not a pointer, so restore_rect's hot path never
+ * carries a pointer that still needs turning back into a table index. */
+static unsigned sky_grad_find_idx(unsigned y)
 {
     unsigned i;
 
     for (i = 0; i < SKY_GRAD_N; i++) {
         if (y >= (unsigned)sky_grads[i].y0 && y < (unsigned)sky_grads[i].y1)
-            return &sky_grads[i];
+            return i;
     }
-    return 0;
+    return SKY_GRAD_N;
 }
 
-/* 0 = all top colour, 16 = all bottom colour (every Bayer cell is < 16). */
+/* 0 = all top colour, 16 = all bottom colour (every Bayer cell is < 16).
+ * Used only by sky_pat_init below, once per row, not per present. */
 static unsigned sky_grad_mix(const sky_gradient *g, unsigned y)
 {
     unsigned span;
@@ -1053,19 +1070,55 @@ static unsigned char sky_grad_byte(const sky_gradient *g, unsigned xbyte,
     return (unsigned char)((l << 4) | (r & 0x0FU));
 }
 
-/* The 4x4 cell is exactly two bytes wide, so one word repeats across a row
- * and the fill stays a rep stosw instead of a per-pixel loop. */
-static unsigned sky_grad_pattern(const sky_gradient *g, unsigned xbyte,
-                                 unsigned y)
+/* sky_grad_byte(g, xbyte, y) depends on xbyte only through its parity (the
+ * 4x4 Bayer cell is two bytes wide), so a row has exactly two possible fill
+ * words for a given (gradient, y): one starting on an even byte column, one
+ * on odd.  restore_rect can re-enter the same row many times a present (once
+ * per dirty rect that touches it), and every entry used to redo a 16-bit
+ * multiply and divide (sky_grad_mix) twice -- once per nibble-pair -- to
+ * regenerate a value that depends on nothing but y.  Precompute both words
+ * for every row of both bands once (self-triggering on first use) into
+ * sky_pat_tab, and turn the per-row cost into a table lookup. */
+static unsigned sky_pat_tab[SKY_GRAD_N][SKY_GRAD_MAXROWS][2];
+static unsigned char sky_pat_ready = 0;
+
+static unsigned sky_grad_pattern_calc(const sky_gradient *g, unsigned xbyte,
+                                      unsigned y)
 {
     return ((unsigned)sky_grad_byte(g, xbyte + 1U, y) << 8)
            | (unsigned)sky_grad_byte(g, xbyte, y);
 }
 
+static void sky_pat_init(void)
+{
+    unsigned gi, row, n, y;
+    const sky_gradient *g;
+
+    for (gi = 0; gi < SKY_GRAD_N; gi++) {
+        g = &sky_grads[gi];
+        n = (unsigned)g->y1 - (unsigned)g->y0;
+        if (n > SKY_GRAD_MAXROWS)
+            n = SKY_GRAD_MAXROWS;       /* cannot happen; guards the table */
+        for (row = 0; row < n; row++) {
+            y = (unsigned)g->y0 + row;
+            sky_pat_tab[gi][row][0] = sky_grad_pattern_calc(g, 0U, y);
+            sky_pat_tab[gi][row][1] = sky_grad_pattern_calc(g, 1U, y);
+        }
+    }
+    sky_pat_ready = 1;
+}
+
+static unsigned sky_grad_pattern(unsigned gi, unsigned xbyte, unsigned y)
+{
+    if (!sky_pat_ready)
+        sky_pat_init();
+    return sky_pat_tab[gi][y - (unsigned)sky_grads[gi].y0][xbyte & 1U];
+}
+
 #define SKY_PAT_MAX     40
 static unsigned sky_rowpat[SKY_PAT_MAX];
 
-static void sky_grad_fill(unsigned seg, const sky_gradient *g, unsigned xbyte,
+static void sky_grad_fill(unsigned seg, unsigned gi, unsigned xbyte,
                           unsigned y, unsigned wbytes, unsigned rows)
 {
     unsigned i, n, off;
@@ -1076,15 +1129,17 @@ static void sky_grad_fill(unsigned seg, const sky_gradient *g, unsigned xbyte,
         if (n > SKY_PAT_MAX)
             n = SKY_PAT_MAX;
         for (i = 0; i < n; i++)
-            sky_rowpat[i] = sky_grad_pattern(g, xbyte, y + off + i);
+            sky_rowpat[i] = sky_grad_pattern(gi, xbyte, y + off + i);
         fill_rows_m8(seg, xbyte, y + off, wbytes, n, sky_rowpat);
         off += n;
     }
 }
 
-static void draw_sky_gradient(unsigned seg, const sky_gradient *g)
+static void draw_sky_gradient(unsigned seg, unsigned gi)
 {
-    sky_grad_fill(seg, g, 0U, (unsigned)g->y0, M8_BYTES_PER_ROW,
+    const sky_gradient *g = &sky_grads[gi];
+
+    sky_grad_fill(seg, gi, 0U, (unsigned)g->y0, M8_BYTES_PER_ROW,
                   (unsigned)g->y1 - (unsigned)g->y0);
 }
 
@@ -1096,9 +1151,9 @@ static void paint_world(unsigned seg)
     fill_band_m8(seg, 0,                HUD_ROWS,       M8_SOLID(HUD_FIELD));
     fill_band_m8(seg, HUD_ROWS,         SKY_DARK_Y0 - HUD_ROWS,
                                         M8_SOLID(SKY_C_BLACK));
-    draw_sky_gradient(seg, &sky_grads[0]);
+    draw_sky_gradient(seg, 0U);
     fill_band_m8(seg, SKY_DARK_Y1,      SKY_DARK_SOLID, M8_SOLID(SKY_C_DARK));
-    draw_sky_gradient(seg, &sky_grads[1]);
+    draw_sky_gradient(seg, 1U);
     fill_band_m8(seg, SKY_HAZE_Y1,      SKY_HAZE_SOLID, M8_SOLID(SKY_C_HAZE));
     fill_band_m8(seg, MOUNTAIN_ROW,     4,              M8_SOLID(8));
     fill_band_m8(seg, GROUND_TOP_ROW,   1,
@@ -1386,14 +1441,53 @@ static unsigned band_solid(unsigned y)
 
 static void plot_px(unsigned seg, unsigned x, unsigned y, unsigned char c);
 
+/* One min/max pass over a dirty list, byte columns for X.  Callers that
+ * probe the same (hit, nhit) pair many times in a row (draw_stars_and_moon
+ * over 36 stars, draw_scenery over every house/fence/base part) compute this
+ * once and reuse it, so dirty_hits_px/dirty_hits_box can reject most probes
+ * in O(1) instead of re-scanning up to DIRTY_MAX rects every time.  Valid
+ * only when nhit != 0; callers must not build or consult one otherwise. */
+typedef struct {
+    unsigned xb0, xb1;      /* byte-column span [xb0, xb1) */
+    unsigned y0, y1;        /* row span [y0, y1) */
+} dirty_bbox;
+
+static void dirty_bbox_calc(dirty_bbox *bb, const dirty_rect *hit,
+                            unsigned nhit)
+{
+    unsigned i, xe, ye;
+
+    bb->xb0 = hit[0].xbyte;
+    bb->xb1 = (unsigned)(hit[0].xbyte + hit[0].wbytes);
+    bb->y0  = hit[0].y;
+    bb->y1  = (unsigned)(hit[0].y + hit[0].rows);
+    for (i = 1; i < nhit; i++) {
+        xe = (unsigned)(hit[i].xbyte + hit[i].wbytes);
+        ye = (unsigned)(hit[i].y + hit[i].rows);
+        if (hit[i].xbyte < bb->xb0)
+            bb->xb0 = hit[i].xbyte;
+        if (xe > bb->xb1)
+            bb->xb1 = xe;
+        if (hit[i].y < bb->y0)
+            bb->y0 = hit[i].y;
+        if (ye > bb->y1)
+            bb->y1 = ye;
+    }
+}
+
 static int dirty_hits_px(const dirty_rect *hit, unsigned nhit,
-                         unsigned x, unsigned y)
+                         const dirty_bbox *bb, unsigned x, unsigned y)
 {
     unsigned i, xb;
 
     if (hit == 0)
         return 1;
+    if (nhit == 0U)
+        return 0;
     xb = x / 2U;
+    if (bb != 0 && (xb < bb->xb0 || xb >= bb->xb1
+                    || y < bb->y0 || y >= bb->y1))
+        return 0;
     for (i = 0; i < nhit; i++) {
         if (y < hit[i].y || y >= hit[i].y + hit[i].rows)
             continue;
@@ -1405,12 +1499,18 @@ static int dirty_hits_px(const dirty_rect *hit, unsigned nhit,
 }
 
 static int dirty_hits_box(const dirty_rect *hit, unsigned nhit,
+                          const dirty_bbox *bb,
                           unsigned x0, unsigned y0, unsigned x1, unsigned y1)
 {
     unsigned i;
 
     if (hit == 0)
         return 1;
+    if (nhit == 0U)
+        return 0;
+    if (bb != 0 && (x1 < bb->xb0 * 2U || x0 >= bb->xb1 * 2U
+                    || y1 < bb->y0 || y0 >= bb->y1))
+        return 0;
     for (i = 0; i < nhit; i++) {
         unsigned ry1 = hit[i].y + hit[i].rows;
         unsigned rx0 = hit[i].xbyte * 2U;
@@ -1426,7 +1526,8 @@ static int dirty_hits_box(const dirty_rect *hit, unsigned nhit,
 }
 
 static int box_hits_dirty(int x, int y, int w, int h,
-                          const dirty_rect *hit, unsigned nhit)
+                          const dirty_rect *hit, unsigned nhit,
+                          const dirty_bbox *bb)
 {
     int x1, y1;
 
@@ -1440,16 +1541,17 @@ static int box_hits_dirty(int x, int y, int w, int h,
         x = 0;
     if (y < (int)HUD_ROWS)
         y = (int)HUD_ROWS;
-    return dirty_hits_box(hit, nhit, (unsigned)x, (unsigned)y,
+    return dirty_hits_box(hit, nhit, bb, (unsigned)x, (unsigned)y,
                           (unsigned)x1, (unsigned)y1);
 }
 
 static int spr_hits_dirty(int x, int y, unsigned char *spr,
-                          const dirty_rect *hit, unsigned nhit)
+                          const dirty_rect *hit, unsigned nhit,
+                          const dirty_bbox *bb)
 {
     if (spr == 0)
         return 0;
-    return box_hits_dirty(x, y, (int)spr[0], (int)spr[1], hit, nhit);
+    return box_hits_dirty(x, y, (int)spr[0], (int)spr[1], hit, nhit, bb);
 }
 
 static void scenery_invalidate(void)
@@ -1509,15 +1611,23 @@ static void draw_stars_and_moon(unsigned seg, const dirty_rect *hit,
 {
     unsigned i, ph;
     unsigned char c;
+    dirty_bbox bb;
+    const dirty_bbox *bbp;
 
     if (hit != 0 && nhit == 0U)
         return;
 
-    if (dirty_hits_box(hit, nhit, 122U, 16U, 131U, 25U))
+    bbp = 0;
+    if (hit != 0) {
+        dirty_bbox_calc(&bb, hit, nhit);
+        bbp = &bb;
+    }
+
+    if (dirty_hits_box(hit, nhit, bbp, 122U, 16U, 131U, 25U))
         draw_moon(seg);
 
     for (i = 0; i < N_STARS; i++) {
-        if (!dirty_hits_px(hit, nhit, star_x[i], star_y[i]))
+        if (!dirty_hits_px(hit, nhit, bbp, star_x[i], star_y[i]))
             continue;
         if (i & 1U) {
             /* White, dark grey, black, yellow.  4 sim ticks per colour. */
@@ -1719,19 +1829,19 @@ static void restore_rect(unsigned seg, const dirty_rect *d)
         ws_t_restore += (unsigned long)rw * (unsigned long)(y1 - y);
 
     while (y < y1) {
-        const sky_gradient *g = sky_grad_find(y);
+        unsigned gi = sky_grad_find_idx(y);
 
-        if (g != 0) {
-            run_y = (unsigned)g->y1;
+        if (gi < SKY_GRAD_N) {
+            run_y = (unsigned)sky_grads[gi].y1;
             if (run_y > y1)
                 run_y = y1;
-            sky_grad_fill(seg, g, xb, y, rw, (unsigned)(run_y - y));
+            sky_grad_fill(seg, gi, xb, y, rw, (unsigned)(run_y - y));
             y = run_y;
             continue;
         }
         solid = band_solid(y);
         run_y = y + 1U;
-        while (run_y < y1 && sky_grad_find(run_y) == 0
+        while (run_y < y1 && sky_grad_find_idx(run_y) == SKY_GRAD_N
                && band_solid(run_y) == solid)
             run_y++;
         fill_rect_m8(seg, xb, y, rw, (unsigned)(run_y - y), solid);
@@ -1953,11 +2063,15 @@ static void blit_at(unsigned seg, int x_px, int y,
 
     xbyte0 = xbyte_from_px(x_px);
     ws_add_blit(rle_run_bytes(s, (unsigned)h));
-    if (!blit_fire && xbyte0 >= 0 &&
-        (unsigned)(xbyte0 + wpx / 2) <= M8_BYTES_PER_ROW)
-        blit_rle_m8(seg, (unsigned)xbyte0, (unsigned)y, data_seg(),
-                    (unsigned)s);
-    else
+    if (!opt_forceclip && xbyte0 >= 0 &&
+        (unsigned)(xbyte0 + wpx / 2) <= M8_BYTES_PER_ROW) {
+        if (blit_fire || opt_forcefire)
+            blit_rle_m8_fire(seg, (unsigned)xbyte0, (unsigned)y, data_seg(),
+                             (unsigned)s);
+        else
+            blit_rle_m8(seg, (unsigned)xbyte0, (unsigned)y, data_seg(),
+                        (unsigned)s);
+    } else
         blit_rle_clip(seg, x_px, y, s, (unsigned)h);
 
     dirty_add(list, (unsigned)xb, (unsigned)y, (unsigned)wb, (unsigned)h);
@@ -4921,16 +5035,18 @@ static void draw_mountains_dirty(unsigned seg, unsigned shift,
                                  const dirty_rect *hit, unsigned nhit)
 {
     int x, i, w, sy;
+    dirty_bbox bb;
 
     if (shift == 0xFFFFU || nhit == 0U)
         return;
     ws_kind = WS_K_MTN;
     sy = (int)MOUNTAIN_ROW;
+    dirty_bbox_calc(&bb, hit, nhit);
     x = -(int)shift;
     i = 0;
     while (x < (int)M8_WIDTH_PX) {
         w = (int)mountain_e[i][0];
-        if (spr_hits_dirty(x, sy, mountain_e[i], hit, nhit))
+        if (spr_hits_dirty(x, sy, mountain_e[i], hit, nhit, &bb))
             blit_at(seg, x, sy, mountain_e[i], mountain_o[i], 0);
         x += w;
         i++;
@@ -4941,7 +5057,8 @@ static void draw_mountains_dirty(unsigned seg, unsigned shift,
 }
 
 static void draw_houses(unsigned seg, dirty_list *list, int full,
-                        const dirty_rect *hit, unsigned nhit, unsigned pg)
+                        const dirty_rect *hit, unsigned nhit,
+                        const dirty_bbox *bb, unsigned pg)
 {
     unsigned i;
     unsigned wx;
@@ -4963,10 +5080,10 @@ static void draw_houses(unsigned seg, dirty_list *list, int full,
             de = house_debris_e;
             fy = world_to_sy(HOUSE_WORLD_Y + 4U);
             if (full
-                || spr_hits_dirty(sx, sy, hs, hit, nhit)
-                || spr_hits_dirty(sx + 4, fy, hi, hit, nhit)
+                || spr_hits_dirty(sx, sy, hs, hit, nhit, bb)
+                || spr_hits_dirty(sx + 4, fy, hi, hit, nhit, bb)
                 || spr_hits_dirty(world_to_sx(wx + 2U),
-                                  world_to_sy(SILL_WORLD_Y), de, hit, nhit)
+                                  world_to_sy(SILL_WORLD_Y), de, hit, nhit, bb)
                 || fire_changed) {
                 blit_aligned(seg, sx, sy, hs, list);
                 blit_aligned(seg, sx + 4, fy, hi, list);
@@ -4975,9 +5092,9 @@ static void draw_houses(unsigned seg, dirty_list *list, int full,
             }
         } else {
             if (full
-                || spr_hits_dirty(sx, sy, house_e, hit, nhit)
+                || spr_hits_dirty(sx, sy, house_e, hit, nhit, bb)
                 || spr_hits_dirty(world_to_sx(wx), world_to_sy(SILL_WORLD_Y),
-                                  house_sill_e, hit, nhit)) {
+                                  house_sill_e, hit, nhit, bb)) {
                 blit_world(seg, wx, HOUSE_WORLD_Y, house_e, house_o, list);
                 blit_world(seg, wx, SILL_WORLD_Y, house_sill_e, house_sill_o,
                            list);
@@ -5009,7 +5126,8 @@ static unsigned fence_tower_x(int tower)
 }
 
 static void draw_fence(unsigned seg, dirty_list *list, int full,
-                       const dirty_rect *hit, unsigned nhit)
+                       const dirty_rect *hit, unsigned nhit,
+                       const dirty_bbox *bb)
 {
     int t;
     unsigned wx;
@@ -5020,7 +5138,7 @@ static void draw_fence(unsigned seg, dirty_list *list, int full,
         wx = fence_tower_x(t);
         sx = world_to_sx(wx);
         sy = world_to_sy(fence_world_y[t]);
-        if (full || spr_hits_dirty(sx, sy, fence_e[t], hit, nhit))
+        if (full || spr_hits_dirty(sx, sy, fence_e[t], hit, nhit, bb))
             blit_world(seg, wx, fence_world_y[t], fence_e[t], fence_o[t],
                        list);
     }
@@ -5057,7 +5175,8 @@ static void draw_pad(unsigned seg, dirty_list *list)
     dirty_add(list, xbu, GROUND_TOP_ROW, rw, PAD_ROWS);
 }
 
-static int pad_hits_dirty(const dirty_rect *hit, unsigned nhit)
+static int pad_hits_dirty(const dirty_rect *hit, unsigned nhit,
+                          const dirty_bbox *bb)
 {
     int sx0, sx1, vis0, vis1;
 
@@ -5068,29 +5187,29 @@ static int pad_hits_dirty(const dirty_rect *hit, unsigned nhit)
     vis0 = (sx0 < 0) ? 0 : sx0;
     vis1 = (sx1 > (int)M8_WIDTH_PX) ? (int)M8_WIDTH_PX : sx1;
     return box_hits_dirty(vis0, (int)GROUND_TOP_ROW, vis1 - vis0,
-                          (int)PAD_ROWS, hit, nhit);
+                          (int)PAD_ROWS, hit, nhit, bb);
 }
 
 static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
                       int full, const dirty_rect *hit, unsigned nhit,
-                      unsigned pg)
+                      const dirty_bbox *bb, unsigned pg)
 {
     unsigned bx = BASE_X + 0x49U;
     unsigned px = BASE_X + 0x71U;
     unsigned char flag_bit, flag_changed;
     unsigned char *flag;
 
-    if (full || pad_hits_dirty(hit, nhit))
+    if (full || pad_hits_dirty(hit, nhit, bb))
         draw_pad(seg, list);
 
     if (full
         || spr_hits_dirty(world_to_sx(bx), world_to_sy(BASE_BUILD_Y),
-                          base_building_e, hit, nhit))
+                          base_building_e, hit, nhit, bb))
         blit_world(seg, bx, BASE_BUILD_Y, base_building_e, base_building_o,
                    list);
     if (full
         || spr_hits_dirty(world_to_sx(px), world_to_sy(FLAGPOLE_Y),
-                          base_flagpole_e, hit, nhit))
+                          base_flagpole_e, hit, nhit, bb))
         blit_world(seg, px, FLAGPOLE_Y, base_flagpole_e, base_flagpole_o,
                    list);
 
@@ -5100,7 +5219,7 @@ static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
     flag = flag_bit ? base_flag_01_e : base_flag_00_e;
     if (full || flag_changed
         || spr_hits_dirty(world_to_sx(px + 2U), world_to_sy(FLAGPOLE_Y),
-                          flag, hit, nhit)) {
+                          flag, hit, nhit, bb)) {
         if (flag_bit)
             blit_world(seg, px + 2U, FLAGPOLE_Y, base_flag_01_e,
                        base_flag_01_o, list);
@@ -5116,10 +5235,18 @@ static void draw_scenery(unsigned seg, unsigned frame, dirty_list *list,
                          int full, const dirty_rect *hit, unsigned nhit,
                          unsigned pg)
 {
+    dirty_bbox bb;
+    const dirty_bbox *bbp;
+
     ws_kind = WS_K_SCENERY;
-    draw_houses(seg, list, full, hit, nhit, pg);
-    draw_fence(seg, list, full, hit, nhit);
-    draw_base(seg, frame, list, full, hit, nhit, pg);
+    bbp = 0;
+    if (!full && hit != 0 && nhit != 0U) {
+        dirty_bbox_calc(&bb, hit, nhit);
+        bbp = &bb;
+    }
+    draw_houses(seg, list, full, hit, nhit, bbp, pg);
+    draw_fence(seg, list, full, hit, nhit, bbp);
+    draw_base(seg, frame, list, full, hit, nhit, bbp, pg);
     ws_kind = WS_K_SPRITE;
 }
 
@@ -5586,6 +5713,12 @@ static void usage(void)
 "  /force       run even if the BIOS model byte is not a PCjr's\n"
 "  /ztimer      Zen-timer one present at sim_frame 4 (pad, dirty list live)\n"
 "  /ztimer=N    same, at sim_frame N.  Interrupts off; do not touch keys.\n"
+"  /forceclip   debug: every RLE blit takes the slow per-byte C fallback\n"
+"               (blit_rle_clip) instead of the fast blit_rle_m8 assembly\n"
+"               path.  Isolates the two paths' cost; not a play mode.\n"
+"  /forcefire   debug: every in-bounds RLE blit takes blit_rle_m8_fire, as\n"
+"               if blit_fire were set, without touching game state.\n"
+"               Isolates the fire-remap fast path; not a play mode.\n"
 "  /?           this\n"
 "\n"
 "Stick: Paku Paku 1.6a port 201h loop (CLI, bits high, timeout 7FFFh).\n"
@@ -5643,6 +5776,10 @@ static int parse_args(int argc, char **argv)
             opt_ztimer = ZTIMER_DEFAULT;
         else if (strncmp(a, "ztimer=", 7) == 0)
             opt_ztimer = (unsigned)atoi(a + 7);
+        else if (strcmp(a, "forceclip") == 0)
+            opt_forceclip = 1;
+        else if (strcmp(a, "forcefire") == 0)
+            opt_forcefire = 1;
         else if (strncmp(a, "frames=", 7) == 0) {
             opt_frames = (unsigned)atoi(a + 7);
             saw_frames = 1;
