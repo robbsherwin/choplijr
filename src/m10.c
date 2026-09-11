@@ -1180,8 +1180,8 @@ static void draw_sky_gradient(unsigned seg, unsigned gi)
                   (unsigned)g->y1 - (unsigned)g->y0);
 }
 
-static void draw_stars_and_moon(unsigned seg, const dirty_rect *hit,
-                                unsigned nhit);
+static void draw_stars_and_moon(unsigned seg, unsigned pg,
+                                const dirty_rect *hit, unsigned nhit);
 
 static void paint_world(unsigned seg)
 {
@@ -1197,7 +1197,7 @@ static void paint_world(unsigned seg)
                                         M8_SOLID(M8_IDX_GROUND_HI));
     fill_band_m8(seg, GROUND_TOP_ROW+1, 199 - GROUND_TOP_ROW,
                                         M8_SOLID(M8_IDX_GROUND));
-    draw_stars_and_moon(seg, 0, 0);
+    draw_stars_and_moon(seg, 0, 0, 0);
 }
 
 /* Debug HUD: 4x6 glyphs, bit 3 = leftmost pixel.  Grey band, ink black. */
@@ -1519,45 +1519,22 @@ static void dirty_bbox_calc(dirty_bbox *bb, const dirty_rect *hit,
     }
 }
 
-/* Called ~36+ times per present (once per star, more via dirty_hits_box)
- * with a small nhit each -- CLAUDE-THOUGHTS.md finding #2 found the O(n)
- * scan itself is already cheap at this list size, so the fixed __cdecl
- * push/pop-per-call overhead is the actual cost worth cutting here
- * (finding #5). hit/nhit are the two fields every call site has in hand
- * first; bb/x/y stay on the stack, same as before. modify is the full
- * register set since the body is ordinary C, not hand-written asm -- this
- * only removes argument-passing overhead, it does not try to keep
- * anything alive across the call. */
-static int dirty_hits_px(const dirty_rect *hit, unsigned nhit,
-                         const dirty_bbox *bb, unsigned x, unsigned y);
-#pragma aux dirty_hits_px parm [ax] [dx] value [ax] modify [ax bx cx dx];
-
-static int dirty_hits_px(const dirty_rect *hit, unsigned nhit,
-                         const dirty_bbox *bb, unsigned x, unsigned y)
-{
-    unsigned i, xb;
-
-    if (hit == 0)
-        return 1;
-    if (nhit == 0U)
-        return 0;
-    xb = x / 2U;
-    if (bb != 0 && (xb < bb->xb0 || xb >= bb->xb1
-                    || y < bb->y0 || y >= bb->y1))
-        return 0;
-    for (i = 0; i < nhit; i++) {
-        if (y < hit[i].y || y >= hit[i].y + hit[i].rows)
-            continue;
-        if (xb < hit[i].xbyte || xb >= hit[i].xbyte + hit[i].wbytes)
-            continue;
-        return 1;
-    }
-    return 0;
-}
-
-/* Same reasoning as dirty_hits_px above: called ~20 times per present
- * (once per house/fence-tower/base sub-blit via box_hits_dirty), small
- * nhit, fixed call overhead dominates. */
+/* Called ~20 times per present (once per house/fence-tower/base sub-blit
+ * via box_hits_dirty) with a small nhit each -- CLAUDE-THOUGHTS.md finding
+ * #2 found the O(n) scan itself is already cheap at this list size, so the
+ * fixed __cdecl push/pop-per-call overhead is the actual cost worth
+ * cutting here (finding #5). hit/nhit are the two fields every call site
+ * has in hand first; bb/x0/y0/x1/y1 stay on the stack, same as before.
+ * modify is the full register set since the body is ordinary C, not
+ * hand-written asm -- this only removes argument-passing overhead, it
+ * does not try to keep anything alive across the call.
+ *
+ * dirty_hits_px used to live here too (the same register-passing change,
+ * for the same reason) until stars stopped using it as their redraw
+ * gate -- they move every tick now (slow parallax, replacing the removed
+ * mountain band as the motion cue) and dirty_add their own footprint
+ * instead, docs/M10.md item 9. Removed rather than left as dead code with
+ * no caller. */
 static int dirty_hits_box(const dirty_rect *hit, unsigned nhit,
                           const dirty_bbox *bb,
                           unsigned x0, unsigned y0, unsigned x1, unsigned y1);
@@ -1629,23 +1606,52 @@ static void scenery_invalidate(void)
  * a fixed moon.  Stars twinkle by rewriting bit patterns; here a few 1-px
  * dots in the upper sky dim or skip.  The second dozen sit in the solid
  * black the chopper can actually reach (ceiling ~row 70–87, black to 110).
- * Not added to the dirty list — restore_rect wipes them, then we redraw.
- * Callers must run this after the sky gradient, or the dither paints over
- * the stars. */
-#define N_STARS         36U
+ * The moon is not added to the dirty list -- restore_rect wipes it, then
+ * we redraw, same as ever.  Stars are (docs/M10.md item 9): a slow-
+ * parallax star field replaces the flat, near-invisible mountain band as
+ * the motion cue between the border and the first barracks.
+ *
+ * First cut routed every visible star through lists[back]/restore_list
+ * every page-visit, like a sprite: dirty_add its current pixel, let the
+ * next restore_list erase it.  Measured cost: 68 -> 84 BIOS ticks on the
+ * static-pad smoke test, worse than the mountain it replaced.  The reason:
+ * at this parallax rate a star's pixel column is unchanged from one
+ * page-visit to the next almost all the time (colour-cycling is the only
+ * thing that varies tick to tick, and overwriting a pixel with a new
+ * colour needs no erase first) -- but the old code paid restore_rect's
+ * full sky-gradient-aware erase for all ~29 lit stars on *every* visit
+ * regardless, because dirty_add doesn't know "this didn't move." Fixed by
+ * tracking each star's last-drawn column per page (star_last_sx) and only
+ * calling restore_rect when a star's column actually changes or it goes
+ * dark -- both rare at this drift rate -- instead of routing it through
+ * the generic dirty list at all.
+ *
+ * That fix's own static-pad measurement (back to 68 ticks, matching the
+ * pre-mountain baseline) turned out to prove nothing about real flight:
+ * the pad test never scrolls at all (scroll_terrain's landed_base branch
+ * adds 4 to scroll_x but scroll_clamp immediately clamps it back to
+ * SCROLL_START every tick), so the "column changed" branch this fix
+ * added never once fired in that test. In real flight scroll_x moves
+ * every tick, and every star reads off the *same* shared parallax
+ * offset (star_shift below) -- so whenever that shared value ticks over
+ * by a pixel, which is common at flight speed, every currently-lit star
+ * crosses the "moved" branch on the same tick and all get erased and
+ * redrawn together. Attended play confirmed this was still slow.  Two
+ * independent levers fix it: fewer stars shrinks each synchronized
+ * redraw (it's a plain loop over however many are lit), and a slower
+ * drift rate makes the shared offset tick over less often in the first
+ * place.  Both applied below -- 36 stars down to 8, shift 5 to 7. */
+#define N_STARS         8U
+/* 1/64th of world_to_sx's screen-pixel rate (>>1): a shared offset this
+ * coarse only advances once every 128 units of scroll_x, so the
+ * synchronized whole-field redraw above fires a quarter as often as it
+ * did at shift 5, on top of running over 8 stars instead of 36. */
+#define STAR_PARALLAX_SHIFT 7U
 static const unsigned char star_x[N_STARS] = {
-    8, 22, 35, 48, 61, 74, 88, 97, 110, 14,
-    29, 41, 55, 69, 82, 101, 115, 145, 151, 6,
-    138, 90, 52, 160 - 18,
-    18, 40, 63, 85, 102, 124, 147, 9,
-    33, 77, 118, 153
+    12, 38, 65, 91, 118, 143, 24, 104
 };
 static const unsigned char star_y[N_STARS] = {
-    12, 18, 11, 28, 15, 22, 14, 31, 19, 38,
-    44, 36, 51, 42, 48, 39, 52, 33, 24, 55,
-    46, 58, 21, 16,
-    64, 71, 67, 78, 73, 81, 69, 86,
-    92, 96, 83, 91
+    14, 22, 12, 94, 18, 108, 72, 86
 };
 
 static void draw_moon(unsigned seg)
@@ -1671,42 +1677,100 @@ static void draw_moon(unsigned seg)
 
 static const unsigned char star_cycle[4] = { 15, 8, 0, 14 };
 
-static void draw_stars_and_moon(unsigned seg, const dirty_rect *hit,
-                                unsigned nhit)
+/* Per page, per star: the pixel column it was last drawn at, or STAR_NONE
+ * if it is currently dark (nothing there to erase). Indexed [pg][i] where
+ * pg matches back/seg_a-seg_b the same way lists[]/scenery_mark[] do.
+ * Reset to STAR_NONE anywhere those are reset (next_sortie, game start) --
+ * a stale column surviving a scenery wipe would try to restore a pixel
+ * that paint_world's fresh fill already made correct. */
+#define STAR_NONE 0xFFU
+static unsigned char star_last_sx[2][N_STARS];
+
+static void reset_star_tracking(void)
 {
-    unsigned i, ph;
-    unsigned char c;
+    unsigned i;
+
+    for (i = 0; i < N_STARS; i++)
+        star_last_sx[0][i] = star_last_sx[1][i] = (unsigned char)STAR_NONE;
+}
+
+static void restore_rect(unsigned seg, const dirty_rect *d);
+
+static void draw_stars_and_moon(unsigned seg, unsigned pg,
+                                const dirty_rect *hit, unsigned nhit)
+{
+    unsigned i, ph, sx, star_shift;
+    unsigned char c, old_sx;
     dirty_bbox bb;
     const dirty_bbox *bbp;
+    dirty_rect er;
 
-    if (hit != 0 && nhit == 0U)
-        return;
-
-    bbp = 0;
-    if (hit != 0) {
-        dirty_bbox_calc(&bb, hit, nhit);
-        bbp = &bb;
+    /* Moon: unchanged, still conditional on the incoming (already-restored)
+     * dirty list -- it never moves, so it only needs a redraw if something
+     * else's restore just erased part of it. hit==0 (paint_world's initial
+     * full draw) means "no filtering, always hit"; hit!=0 && nhit==0 means
+     * a genuinely empty dirty list this tick, nothing to check against. */
+    if (hit == 0 || nhit != 0U) {
+        bbp = 0;
+        if (hit != 0) {
+            dirty_bbox_calc(&bb, hit, nhit);
+            bbp = &bb;
+        }
+        if (dirty_hits_box(hit, nhit, bbp, 122U, 16U, 131U, 25U))
+            draw_moon(seg);
     }
 
-    if (dirty_hits_box(hit, nhit, bbp, 122U, 16U, 131U, 25U))
-        draw_moon(seg);
-
+    /* Stars: hit==0 is paint_world's one-time initial fill onto a blank
+     * page -- draw every visible star, but there is nothing tracked yet
+     * to erase and nothing to record (next_sortie/game-start reset
+     * star_last_sx to STAR_NONE right after this runs anyway). */
+    star_shift = (unsigned)((scroll_x >> STAR_PARALLAX_SHIFT) % M8_WIDTH_PX);
+    er.wbytes = 1U;
+    er.rows   = 1U;
     for (i = 0; i < N_STARS; i++) {
-        if (!dirty_hits_px(hit, nhit, bbp, star_x[i], star_y[i]))
-            continue;
+        sx = (star_x[i] + M8_WIDTH_PX * 4U - star_shift) % M8_WIDTH_PX;
         if (i & 1U) {
             /* White, dark grey, black, yellow.  4 sim ticks per colour. */
             ph = ((sim_frame / 4U) + i) & 3U;
             c = star_cycle[ph];
-            if (c == 0U)
-                continue;
         } else {
             ph = (sim_frame + i * 5U) & 7U;
-            if (ph == 0U)
-                continue;
-            c = (ph < 3U) ? 7 : 15;
+            c = (ph == 0U) ? 0U : ((ph < 3U) ? 7U : 15U);
         }
-        plot_px(seg, (unsigned)star_x[i], (unsigned)star_y[i], c);
+
+        if (hit == 0) {
+            if (c != 0U)
+                plot_px(seg, sx, (unsigned)star_y[i], c);
+            continue;
+        }
+
+        old_sx = star_last_sx[pg][i];
+
+        if (c == 0U) {
+            /* Gone dark: erase the last column it was drawn at, if any --
+             * a colour-cycle transition, not a move, so this is the only
+             * case that needs restore_rect at the *old* spot. */
+            if (old_sx != (unsigned char)STAR_NONE) {
+                er.xbyte = (unsigned)old_sx / 2U;
+                er.y     = (unsigned)star_y[i];
+                restore_rect(seg, &er);
+                star_last_sx[pg][i] = (unsigned char)STAR_NONE;
+            }
+            continue;
+        }
+
+        if (old_sx != (unsigned char)STAR_NONE
+            && old_sx != (unsigned char)sx) {
+            /* Parallax carried it a full pixel since this page's last
+             * visit: the old column is now stale and nothing else will
+             * ever revisit it, so erase it here before drawing the new
+             * one. At STAR_PARALLAX_SHIFT's drift rate this is rare. */
+            er.xbyte = (unsigned)old_sx / 2U;
+            er.y     = (unsigned)star_y[i];
+            restore_rect(seg, &er);
+        }
+        plot_px(seg, sx, (unsigned)star_y[i], c);
+        star_last_sx[pg][i] = (unsigned char)sx;
     }
 }
 
@@ -4629,8 +4693,26 @@ static void draw_ents(unsigned seg, dirty_list *list)
                 fi = 4;
             if (fi < 0)
                 fi = 0;
-            blit_aligned(seg, sx + (signed char)cannon_angle_x[fi],
-                         sy - 7, tank_cannon_e[fi], list);
+            /* dir/cannon_angle_x/tank_cannon_e are all indexed 0=chopper-
+             * left..4=chopper-right by update_tank's aim math (tank_aim_
+             * table: scratch small -> dir--, "swing left"; scratch large
+             * -> dir++, "swing right") and by fire_tank_shell's own
+             * shell_launch_vx, which fires left (-12) at dir 0 and right
+             * (+12) at dir 4 -- unambiguous, since a shell that does not
+             * fly toward the side the tank aimed at cannot ever hit
+             * anything. cannon_angle_x/tank_cannon_e, taken from the
+             * original ROM's cannonAngleOffsets/tankCannonSpriteTable,
+             * put index 0's sprite+offset on the tank's right side, so
+             * indexing them with dir directly draws the barrel pointing
+             * the opposite way from where dir says the target (and the
+             * shell) actually is -- reported as "turret doesn't point
+             * where the shots go." Flipping the index only for this draw
+             * (4-fi) leaves dir/tank_aim_table/shell_launch_* untouched
+             * and just picks the mirror-image entry from those two visual
+             * tables, so the sprite/offset pairing itself is unchanged --
+             * only which dir value selects which one. */
+            blit_aligned(seg, sx + (signed char)cannon_angle_x[4 - fi],
+                         sy - 7, tank_cannon_e[4 - fi], list);
         } else if (e->type == ET_JET) {
             fi = jet_sprite_frame(e);
             spr = (e->dir < 0) ? jet_fe[fi] : jet_e[fi];
@@ -5133,6 +5215,21 @@ static void next_sortie(void)
                                      * ground. */
     last_flag_bit[0] = last_flag_bit[1] = 0xFF;
     last_fire_bit[0] = last_fire_bit[1] = 0xFF;
+    reset_star_tracking();
+    /* paint_world above just wiped the HUD band to plain green (no
+     * digits) along with the rest of the background, but draw_hud's own
+     * change-detection cache (hud_pg_mode/hud_pg_k/a/r) does not know
+     * that -- it only redraws when hostages_killed/loaded/total_rescues
+     * differ from what it last drew. Dying with no hostages aboard
+     * leaves all three unchanged across a sortie transition (nothing to
+     * murder_aboard, no new rescue), so the cache wrongly believes the
+     * counters it drew last sortie are still on screen and skips
+     * redrawing forever -- reported as a blank green HUD band after
+     * dying into the second (or third) sortie. Resetting hud_pg_mode to
+     * 0 here, the same way run_viewer's own game-start setup already
+     * does, forces draw_hud's next call to treat this page as needing a
+     * real redraw regardless of whether the counters moved. */
+    hud_pg_mode[0] = hud_pg_mode[1] = 0;
 }
 
 static void sim_tick(void)
@@ -5216,17 +5313,13 @@ static int any_house_burning(void)
 
 static void draw_houses(unsigned seg, dirty_list *list, int full,
                         const dirty_rect *hit, unsigned nhit,
-                        const dirty_bbox *bb, unsigned pg)
+                        const dirty_bbox *bb, unsigned char fire_bit,
+                        unsigned char fire_changed)
 {
     unsigned i;
     unsigned wx;
     int      sx, sy, fy;
-    unsigned char fire_bit, fire_changed;
     unsigned char *hs, *hi, *de;
-
-    fire_bit = (unsigned char)((sim_frame / 4U) & 1U);
-    fire_changed = (unsigned char)(fire_bit != last_fire_bit[pg]);
-    last_fire_bit[pg] = fire_bit;
 
     for (i = 0; i < N_HOUSES; i++) {
         wx = FARHOUSE_X + i * HOUSE_SPACING;
@@ -5283,9 +5376,14 @@ static unsigned fence_tower_x(int tower)
     return (unsigned)((long)FENCE_X + (d & ~1L));
 }
 
+/* fire_changed: see draw_base's comment on the same parameter -- a burning
+ * house's fire-frame flip forces a scenery_mark restore (run_viewer,
+ * any_house_burning()) that erases the fence's tracked footprint here too,
+ * whether or not a fence tower is anywhere near that house, and nothing
+ * else guarantees a redraw for it that same tick. */
 static void draw_fence(unsigned seg, dirty_list *list, int full,
                        const dirty_rect *hit, unsigned nhit,
-                       const dirty_bbox *bb)
+                       const dirty_bbox *bb, unsigned char fire_changed)
 {
     int t;
     unsigned wx;
@@ -5296,7 +5394,7 @@ static void draw_fence(unsigned seg, dirty_list *list, int full,
         wx = fence_tower_x(t);
         sx = world_to_sx(wx);
         sy = world_to_sy(fence_world_y[t]);
-        if (full || spr_hits_dirty(sx, sy, fence_e[t], hit, nhit, bb))
+        if (full || fire_changed || spr_hits_dirty(sx, sy, fence_e[t], hit, nhit, bb))
             blit_world(seg, wx, fence_world_y[t], fence_e[t], fence_o[t],
                        list);
     }
@@ -5348,24 +5446,40 @@ static int pad_hits_dirty(const dirty_rect *hit, unsigned nhit,
                           (int)PAD_ROWS, hit, nhit, bb);
 }
 
+/* fire_changed: a burning house's fire-frame flip (every 4 sim ticks, from
+ * sortie 1 on -- see run_viewer's any_house_burning() gate) forces a
+ * restore_list over scenery_mark[pg], which is the SAME tracked-footprint
+ * list draw_pad/draw_base/draw_fence dirty_add into -- so that restore
+ * erases the base and fence right along with the houses. draw_houses
+ * self-heals from this because it re-checks its own fire_changed every
+ * call; draw_pad/draw_base/draw_fence had no such signal, so whenever
+ * this fire-triggered restore fired while the player was not, by luck,
+ * also overlapping them via the ordinary sprite hit-test, they stayed
+ * erased until the next real scroll -- reported as the base "disappearing
+ * and reappearing" while hovering near the start, where scroll_clamp
+ * pins scroll_x and a real full_sc scroll redraw may not happen for many
+ * seconds. Reusing fire_changed here (not a new flag) because it is
+ * already computed once per draw_scenery call for exactly this
+ * restore/redraw pairing. */
 static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
                       int full, const dirty_rect *hit, unsigned nhit,
-                      const dirty_bbox *bb, unsigned pg)
+                      const dirty_bbox *bb, unsigned pg,
+                      unsigned char fire_changed)
 {
     unsigned bx = BASE_X + 0x49U;
     unsigned px = BASE_X + 0x71U;
     unsigned char flag_bit, flag_changed;
     unsigned char *flag;
 
-    if (full || pad_hits_dirty(hit, nhit, bb))
+    if (full || fire_changed || pad_hits_dirty(hit, nhit, bb))
         draw_pad(seg, list);
 
-    if (full
+    if (full || fire_changed
         || spr_hits_dirty(world_to_sx(bx), world_to_sy(BASE_BUILD_Y),
                           base_building_e, hit, nhit, bb))
         blit_world(seg, bx, BASE_BUILD_Y, base_building_e, base_building_o,
                    list);
-    if (full
+    if (full || fire_changed
         || spr_hits_dirty(world_to_sx(px), world_to_sy(FLAGPOLE_Y),
                           base_flagpole_e, hit, nhit, bb))
         blit_world(seg, px, FLAGPOLE_Y, base_flagpole_e, base_flagpole_o,
@@ -5375,7 +5489,7 @@ static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
     flag_changed = (unsigned char)(flag_bit != last_flag_bit[pg]);
     last_flag_bit[pg] = flag_bit;
     flag = flag_bit ? base_flag_01_e : base_flag_00_e;
-    if (full || flag_changed
+    if (full || fire_changed || flag_changed
         || spr_hits_dirty(world_to_sx(px + 2U), world_to_sy(FLAGPOLE_Y),
                           flag, hit, nhit, bb)) {
         if (flag_bit)
@@ -5395,6 +5509,7 @@ static void draw_scenery(unsigned seg, unsigned frame, dirty_list *list,
 {
     dirty_bbox bb;
     const dirty_bbox *bbp;
+    unsigned char fire_bit, fire_changed;
 
     ws_kind = WS_K_SCENERY;
     bbp = 0;
@@ -5402,9 +5517,17 @@ static void draw_scenery(unsigned seg, unsigned frame, dirty_list *list,
         dirty_bbox_calc(&bb, hit, nhit);
         bbp = &bb;
     }
-    draw_houses(seg, list, full, hit, nhit, bbp, pg);
-    draw_fence(seg, list, full, hit, nhit, bbp);
-    draw_base(seg, frame, list, full, hit, nhit, bbp, pg);
+    /* Computed once and shared: run_viewer's any_house_burning() gate
+     * compares sim_frame the same way against this same last_fire_bit[pg]
+     * *before* calling here, to decide whether to restore scenery_mark[pg]
+     * (which houses/fence/base all dirty_add into) ahead of this redraw --
+     * see draw_base's comment on its fire_changed parameter. */
+    fire_bit = (unsigned char)((frame / 4U) & 1U);
+    fire_changed = (unsigned char)(fire_bit != last_fire_bit[pg]);
+    last_fire_bit[pg] = fire_bit;
+    draw_houses(seg, list, full, hit, nhit, bbp, fire_bit, fire_changed);
+    draw_fence(seg, list, full, hit, nhit, bbp, fire_changed);
+    draw_base(seg, frame, list, full, hit, nhit, bbp, pg, fire_changed);
     ws_kind = WS_K_SPRITE;
 }
 
@@ -5768,6 +5891,7 @@ static void run_viewer(void)
     scenery_invalidate();
     last_flag_bit[0] = last_flag_bit[1] = 0xFF;
     last_fire_bit[0] = last_fire_bit[1] = 0xFF;
+    reset_star_tracking();
     hud_pg_mode[0] = hud_pg_mode[1] = 0;
     scroll_x = SCROLL_START;
     init_helicopter();
@@ -5855,7 +5979,7 @@ static void run_viewer(void)
 
             old_n = lists[back].n;
             restore_list(back_seg, &lists[back]);
-            draw_stars_and_moon(back_seg, lists[back].r, old_n);
+            draw_stars_and_moon(back_seg, back, lists[back].r, old_n);
 
             full_sc = scrolled || scenery_full[back];
             if (full_sc) {
