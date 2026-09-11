@@ -6,9 +6,14 @@ emitted as src/sprdata.c.
 
 M3: the same flying-chopper frames as RLE rows for blit_rle_m8, emitted as
 src/sprdata_rle.c. Packed and RLE are separate objects so m2.exe does not
-carry the RLE set. Side-view chopper frames also get horizontally flipped
-even/odd RLE (`_fe` / `_fo`) so M10 can blit_rle_m8 a nose-left body
-instead of unpacking and mirroring in C every present.
+carry the RLE set. Side-view and head-on/rotating chopper frames also get
+horizontally flipped even/odd RLE (`_fe` / `_fo`) so M10 can blit_rle_m8 a
+nose-left body instead of unpacking and mirroring in C every present. The
+original does this with a real-time signed shear (`jumpSetSpriteTilt` in
+choplifter.s) on one bitmap per tilt; this port pre-renders instead, so the
+mirror needs its own baked copy per frame -- chooseChopperSprite's "unify
+left/right cases" EOR/negate on ACCELX before indexing the tilt table is
+the same idea, just done once here instead of every present.
 
 M10 also emits sheared main-rotor RLE into sprdata_rle.c only (not packed
 sprdata.c): 3 ink frames × 11 tilts × flip, even/odd, cropped to ink.
@@ -687,16 +692,15 @@ def main():
  * nibble edge.  Trailing transparency is implicit.  Index 0 transparent,
  * 15 body, 7 topside, 15 rotor.
  *
- * Side-view frames also have horizontally flipped even/odd RLE (_fe / _fo)
- * so a nose-left body is blit_rle_m8, not a per-present unpack.
+ * Side-view and head-on/rotating frames also have horizontally flipped
+ * even/odd RLE (_fe / _fo) so a nose-left body is blit_rle_m8, not a
+ * per-present unpack or mirror.
  *
  * M10 sheared main-rotor frames (3 ink x 11 tilt x flip, even/odd) follow
  * the pointer tables.  Packed sprdata.c does not get those arrays.
  */
 """)
 
-    view_e = []
-    view_o = []
     tables = []
     rle_flip_tables = []
 
@@ -706,7 +710,7 @@ def main():
         odd_names = []
         fe_names = []
         fo_names = []
-        emit_flip = (cprefix == "chopper_side")
+        emit_flip = cprefix in ("chopper_side", "chopper_head")
         for i in range(count):
             spr = converted[idx][1]
             idx += 1
@@ -714,8 +718,6 @@ def main():
             ident_o = f"{cprefix}_{i:02d}_o"
             even_names.append(ident_e)
             odd_names.append(ident_o)
-            view_e.append(ident_e)
-            view_o.append(ident_o)
             preview = ascii_preview(spr["pix"])
             preview_c = "\n".join(" *   " + line for line in preview)
             extra = ""
@@ -777,15 +779,7 @@ def main():
                 + "\n};\n"
             )
 
-    table_blob = "".join(tables) + "\n" + (
-        "unsigned char *chop_view_e[] = {\n"
-        + ",\n".join(f"    {n}" for n in view_e)
-        + "\n};\n\n"
-        "unsigned char *chop_view_o[] = {\n"
-        + ",\n".join(f"    {n}" for n in view_o)
-        + "\n};\n\n"
-        f"unsigned chop_view_count = {len(view_e)};\n"
-    )
+    table_blob = "".join(tables) + "\n"
     packed_chunks.append(table_blob)
     rle_chunks.append(table_blob)
     if rle_flip_tables:

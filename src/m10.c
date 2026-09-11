@@ -53,6 +53,8 @@ extern unsigned char *chopper_side_fe[11];
 extern unsigned char *chopper_side_fo[11];
 extern unsigned char *chopper_head_e[5];
 extern unsigned char *chopper_head_o[5];
+extern unsigned char *chopper_head_fe[5];
+extern unsigned char *chopper_head_fo[5];
 extern unsigned char *rotor_tilt_e[3][11];
 extern unsigned char *rotor_tilt_o[3][11];
 extern unsigned char *rotor_tilt_fe[3][11];
@@ -417,6 +419,11 @@ static unsigned char    hostages_in_houses[N_HOUSES];
 static unsigned char    scenery_full[2];
 static unsigned char    last_flag_bit[2];
 static unsigned char    last_fire_bit[2];
+/* Tentative redeclarations: next_sortie() (below) needs to reset these the
+ * same way run_viewer()'s setup does, but the real definitions sit next to
+ * the rest of run_viewer()'s per-page state, later in this file. */
+static dirty_list        lists[2];
+static dirty_list        scenery_mark[2];
 static unsigned char    chop_loaded;
 static unsigned char    curr_level;
 static unsigned char    curr_shots;
@@ -5048,6 +5055,41 @@ static void next_sortie(void)
     crash_fx = 0;
     banner_left = BANNER_TICKS;
     snd_silence();
+    /* scroll_x just jumped discontinuously to SCROLL_START, but the
+     * per-tick dirty-rect system only knows how to erase what a sprite's
+     * own dirty rect says changed -- it has no notion of "the whole scene
+     * just changed," so anything drawn at the old scroll position (a
+     * burning house, a tank, whatever was on screen) has no dirty rect
+     * pointing at it any more and is never scheduled for a restore. It
+     * just sits there. A per-tracker reset (scenery_mark/fire-bit state)
+     * caught the narrower case docs/M10.md item 5 originally described but
+     * not this one -- confirmed still visible by eye (2026-09-10),
+     * barracks *and* a tank both surviving into the next sortie.
+     *
+     * The robust fix is the one run_viewer()'s own setup already uses at
+     * game start, before its loop begins: repaint both video pages'
+     * background layer from scratch (paint_world does the whole 0-199
+     * band -- sky, mountain placeholder, ground -- as unconditional fills,
+     * wiping every sprite pixel regardless of what dirty-tracked it),
+     * then force everything else to redraw on top of that clean
+     * background on the very next present, the same way a fresh game's
+     * first tick does. This costs a full-screen fill on both pages once,
+     * at a sortie boundary the player is not otherwise interacting with
+     * (still inside the death animation / banner pause) -- not a per-tick
+     * cost, so not worth trading correctness for here. */
+    paint_world(seg_a);
+    paint_world(seg_b);
+    lists[0].n = lists[1].n = 0;
+    scenery_mark[0].n = scenery_mark[1].n = 0;
+    scenery_invalidate();          /* forces a full houses/fence/base redraw
+                                     * next present, onto the wiped
+                                     * background above -- without this,
+                                     * only sprites the next tick's own
+                                     * dirty list happens to hit would
+                                     * redraw, leaving the rest as bare
+                                     * ground. */
+    last_flag_bit[0] = last_flag_bit[1] = 0xFF;
+    last_fire_bit[0] = last_fire_bit[1] = 0xFF;
 }
 
 static void sim_tick(void)
@@ -5131,6 +5173,7 @@ static unsigned mountain_shift(void)
 static void draw_mountains(unsigned seg, unsigned shift)
 {
     int x, i, w;
+    unsigned n;
 
     if (shift == 0xFFFFU)
         return;
@@ -5141,7 +5184,22 @@ static void draw_mountains(unsigned seg, unsigned shift)
     i = 0;
     while (x < (int)M8_WIDTH_PX) {
         w = (int)mountain_e[i][0];
-        blit_at(seg, x, (int)MOUNTAIN_ROW, mountain_e[i], mountain_o[i], 0);
+        /* blit_mtn_fast (src/asm/blit.asm) skips blit_at's C-side dispatch
+         * for the common on-screen case; !opt_forceclip/!opt_forcefire keep
+         * both debug flags exercising blit_at's real clip/fire paths the
+         * way they always have.  0xFFFF means "needs the slow path" (edge
+         * tile, or a flag forced it) -- blit_at still does that, unchanged,
+         * so the one clipping implementation is never duplicated. */
+        n = 0xFFFFU;
+        if (!opt_forceclip && !opt_forcefire)
+            n = blit_mtn_fast(seg, x, (unsigned)MOUNTAIN_ROW,
+                              (unsigned)mountain_e[i], (unsigned)mountain_o[i]);
+        if (n != 0xFFFFU) {
+            if (!opt_noworkset)
+                ws_add_blit(n);
+        } else {
+            blit_at(seg, x, (int)MOUNTAIN_ROW, mountain_e[i], mountain_o[i], 0);
+        }
         x += w;
         i++;
         if (i >= 4)
@@ -5416,6 +5474,8 @@ static void draw_chopper(unsigned seg, dirty_list *list)
     unsigned       main_i, tail_i;
     unsigned char *be;
     unsigned char *oe;
+    unsigned char *bfe;
+    unsigned char *bfo;
     int            side;
     int            abs_t;
     int            pitch;
@@ -5435,17 +5495,29 @@ static void draw_chopper(unsigned seg, dirty_list *list)
 
     h = 18;
     if (abs_t == 5) {
-        be = chopper_side_e[pitch];
-        oe = chopper_side_o[pitch];
-        h  = (int)be[1];
+        be  = chopper_side_e[pitch];
+        oe  = chopper_side_o[pitch];
+        bfe = chopper_side_fe[pitch];
+        bfo = chopper_side_fo[pitch];
+        h   = (int)be[1];
         side = 1;
     } else {
+        /* chopper_head_fe/fo (tools/build_sprites.py) mirror the same way
+         * chopper_side_fe/fo already did -- until this fix, every
+         * mid-turn frame here drew the same un-mirrored body regardless of
+         * turn direction, visible on the frame closest to a full turn
+         * where the art's own asymmetry is strongest. The original does
+         * this with a real-time signed shear (choplifter.s,
+         * chooseChopperSprite/jumpSetSpriteTilt) on one bitmap; this port
+         * pre-renders, so it needs the baked mirror instead. */
         unsigned hi = (unsigned)abs_t;
         if (hi > 4U)
             hi = 4U;
-        be = chopper_head_e[hi];
-        oe = chopper_head_o[hi];
-        h  = (int)be[1];
+        be  = chopper_head_e[hi];
+        oe  = chopper_head_o[hi];
+        bfe = chopper_head_fe[hi];
+        bfo = chopper_head_fo[hi];
+        h   = (int)be[1];
         side = 0;
     }
 
@@ -5461,12 +5533,11 @@ static void draw_chopper(unsigned seg, dirty_list *list)
 
     main_i = (sim_frame / 2U) % 3U;
     tail_i = (sim_frame / 2U) % 4U;
-    flip = (side && turn_state < 0) ? 1 : 0;
+    flip = (turn_state < 0) ? 1 : 0;
     bw = (int)be[0];
 
     if (flip)
-        blit_at(seg, body_x, body_y, chopper_side_fe[pitch],
-                chopper_side_fo[pitch], list);
+        blit_at(seg, body_x, body_y, bfe, bfo, list);
     else
         blit_at(seg, body_x, body_y, be, oe, list);
 
@@ -5979,10 +6050,8 @@ static void usage(void)
 "  /forceclip   debug: every RLE blit takes blit_rle_clip, not blit_rle_m8\n"
 "  /forcefire   debug: every in-bounds blit takes blit_rle_m8_fire\n"
 "  /noworkset   debug: skip WORKSET/ZTIMER byte counting (prints as 0)\n"
-"  /phases      debug: bios_ticks() phase breakdown (sim_tick/present/flip/\n"
-"               idle, plus present's 5 sub-phases), for the whole run and\n"
-"               again for ticks with a tank+hostage on screen.  Off by\n"
-"               default -- real per-tick cost otherwise.\n"
+"  /phases      debug: bios_ticks() phase breakdown, whole-run and again\n"
+"               for tank+hostage ticks.  Off by default: real cost else.\n"
 "  /?           this\n"
 "\n"
 "Stick: Paku Paku 1.6a port 201h loop (CLI, bits high, timeout 7FFFh).\n"
@@ -5992,22 +6061,11 @@ static void usage(void)
 "before a +/-16 deadzone around 128.  The X table then has a one-nibble\n"
 "centre bucket.  Buttons are stick 1 only (port 201h bits 4-5).\n"
 "\n"
-"Title (BIOS mode 3): default Joystick (cyan J).  J selects Joystick,\n"
-"K selects Keyboard and shows WASD help, C opens the calibrate box\n"
-"(SPACE or stick-1 button snapshots rest; Esc cancels).  SPACE on the\n"
-"title starts mode 8 logos (Broderbund, Choplifter, Dan Gorlin, mission),\n"
-"then play.  SPACE skips a logo.  Esc on the title or logos quits to DOS.\n"
-"Stick button does not start from the title.  Keyboard flight: WASD (arrows extra),\n"
-"'.' rotate, '/' fire.  Joystick flight: analog plus WASD/arrows,\n"
-"button 0 fire (cap 5), button 1 / '.' / Alt / Left Shift rotate.\n"
-"Ctrl-A / Ctrl-V invert axes.  Ctrl-S toggles sound.  Esc ends play.\n"
-"HUD is three 24x8 bubbles (killed / aboard / rescued).  F1 or `\n"
-"toggles the debug HUD (off by default).  Sim is 20 Hz; the screen may\n"
-"flip faster.  Land next to waving hostages to board (cap 16); land on\n"
-"the base pad to unload.  Tanks spawn past the fence; fire at them;\n"
-"shells ignite barracks.  Crash or shot-down uses explosion / sink then\n"
-"the next sortie (three lives).  64 rescued shows the crown; 64 killed\n"
-"or a third crash shows The End, then the BIOS title again.\n");
+"Title: J/K pick Joystick/Keyboard, C calibrates, SPACE flies, Esc quits.\n"
+"Keyboard: WASD/arrows, '.' rotate, '/' fire.  Joystick: analog plus\n"
+"WASD/arrows, button 0 fire, button 1/'.'/Alt/LShift rotate.  Ctrl-A/V\n"
+"invert axes, Ctrl-S mutes.  docs/M5.md and docs/M10.md cover the rest\n"
+"(HUD layout, sortie flow, win/lose).\n");
 }
 
 static int parse_args(int argc, char **argv)

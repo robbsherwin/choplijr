@@ -216,6 +216,25 @@ unsigned __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
 unsigned __cdecl blit_rle_m8_fire(unsigned dseg, unsigned xbyte, unsigned y,
                                   unsigned sseg, unsigned soff);
 
+/* M10: fast-path-only twin of what blit_at() does for one draw_mountains()
+ * tile call (src/m10.c) -- picks even/odd by x_px parity, checks the same
+ * on-screen and byte-alignment conditions blit_at's fast path does, and
+ * calls blit_rle_m8 directly, skipping blit_at's C-side dispatch (dirty-list
+ * tracking, blit_fire check, y/height clamp) that this call site never
+ * needs: draw_mountains always passes a null dirty list, mountains never
+ * catch fire, and MOUNTAIN_ROW+4 is always on-screen. even/odd are near
+ * (DGROUP) sprite offsets, passed as plain unsigned the same way callers
+ * already cast a sprite pointer for blit_rle_m8 itself.
+ *
+ * Returns 0xFFFF if the tile needs the slow clipped path (byte range not
+ * fully in [0,80)) -- the caller must fall back to blit_at() itself so the
+ * one clipping implementation stays in one place, never reimplemented here.
+ * Otherwise returns the byte count blit_rle_m8 copied (0 is legitimate: a
+ * fully off-screen tile, nothing drawn), for the caller to add to WORKSET
+ * via ws_add_blit the same way blit_at's own fast path does. */
+unsigned __cdecl blit_mtn_fast(unsigned dseg, int x_px, unsigned y,
+                               unsigned even, unsigned odd);
+
 /* DGROUP segment.  Small-model near pointers are offsets from this. */
 unsigned __cdecl data_seg(void);
 

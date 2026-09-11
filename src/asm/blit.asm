@@ -443,3 +443,104 @@ fire_tab:
         db      0xD0,0xD1,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,0xDC,0xDD,0xDE,0xDF        ; D0h-DFh
         db      0x40,0xC1,0xE2,0x43,0xC4,0xE5,0x46,0xC7,0xE8,0x49,0xCA,0xEB,0x4C,0xCD,0xE4,0x4F        ; E0h-EFh
         db      0xF0,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA,0xFB,0xFC,0xFD,0xFC,0xFF        ; F0h-FFh
+
+;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+; unsigned __cdecl blit_mtn_fast(unsigned dseg, int x_px, unsigned y,
+;                                unsigned even, unsigned odd)
+;
+; M10: fast-path-only twin of blit_at()'s draw_mountains() call (m10.c).
+; draw_mountains() retiles the 4-tile mountain band on (almost) every
+; scrolling tick -- CLAUDE-THOUGHTS.md's combat-window capture found
+; `mountain` at 28% of `present` in real flight (vs 5% on the static pad),
+; and every one of those tiles used to pay blit_at's full C-side dispatch
+; (dirty-list bookkeeping, blit_fire check, y/height clamp) even though this
+; call site never needs any of it: draw_mountains always passes a null
+; dirty list, mountains never catch fire (blit_fire is only ever set right
+; around an explosion sprite in draw_ents, and cleared before that call
+; returns -- draw_mountains runs earlier in the same present), and
+; MOUNTAIN_ROW+4 is always on-screen.
+;
+; even/odd are near (DGROUP) sprite offsets -- same DS the caller and this
+; routine both already run in, so no segment switch is needed to read the
+; sprite header.  xbyte0 = x_px >> 1 (arithmetic shift) is exactly
+; xbyte_from_px()'s (x-1)/2-for-negative/x/2-for-nonnegative split: floor
+; division by 2 either way, verified by hand for x_px in -5..0 before
+; using it here.
+;
+; Returns 0xFFFF if the tile needs the slow clipped path (byte range not
+; fully within [0,80)) or is a degenerate 0-width sprite -- the caller must
+; fall back to blit_at() itself, so blit_rle_clip's per-byte RMW path is
+; never reimplemented here, only ever reused. Otherwise returns the byte
+; count blit_rle_m8 copied (0 is legitimate: the tile was fully
+; off-screen), for the caller to add to WORKSET via ws_add_blit the same
+; way blit_at's own fast path does.
+;
+; Caller guarantees: y+4 <= 200 (true for MOUNTAIN_ROW always).
+;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+        global  _blit_mtn_fast
+_blit_mtn_fast:
+        push    bp
+        mov     bp,sp
+        push    di
+        push    si
+        push    ds
+        push    es
+        cld
+
+        mov     ax,[bp+6]               ; x_px
+        mov     bx,[bp+10]              ; even (default)
+        test    al,1
+        jz      .have_s
+        mov     bx,[bp+12]              ; odd
+.have_s:
+        mov     si,bx                   ; s -- our own DS is already right
+
+        xor     ch,ch
+        mov     cl,[si]                 ; cx = wpx, zero-extended
+        or      cx,cx
+        jz      .offscreen              ; degenerate sprite: nothing to draw
+
+        mov     dx,ax                   ; dx = x_px (kept for the >=160 test)
+        add     ax,cx                   ; ax = x1 = x_px + wpx
+        cmp     ax,0
+        jle     .offscreen              ; x1 <= 0
+        cmp     dx,160                  ; M8_WIDTH_PX
+        jge     .offscreen              ; x_px >= 160
+
+        mov     ax,dx
+        sar     ax,1                    ; xbyte0 = x_px >> 1 (arithmetic)
+        cmp     ax,0
+        jl      .needs_clip
+
+        mov     bx,cx                   ; bx = wpx
+        shr     bx,1                    ; wpx/2
+        add     bx,ax                   ; xbyte0 + wpx/2
+        cmp     bx,80                   ; M8_ROW_BYTES
+        jg      .needs_clip
+
+        ; Fast path.  ax = xbyte0, si = s (soff), our own DS = sseg.
+        ; cdecl: push right-to-left so [bp+4] lands on dseg for the callee.
+        mov     bx,ds
+        push    si                      ; soff
+        push    bx                      ; sseg
+        push    word [bp+8]             ; y
+        push    ax                      ; xbyte0
+        push    word [bp+4]             ; dseg
+        call    _blit_rle_m8
+        add     sp,10
+        jmp     short .ret
+
+.needs_clip:
+        mov     ax,0xFFFF
+        jmp     short .ret
+
+.offscreen:
+        xor     ax,ax
+
+.ret:
+        pop     es
+        pop     ds
+        pop     si
+        pop     di
+        pop     bp
+        ret
