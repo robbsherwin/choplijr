@@ -1,0 +1,57 @@
+Choplifter! PCjr -- M10 polish
+hardware validation (workset bytes, /ztimer)  ground BROWN
+
+BIOS model byte at F000:FFFE ... FD (IBM PCjr)
+int 12h 736 KB, pages on entry CRT=4 CPU=4
+  JrConfig: JRCONSYS at 09C4:0000, 64 KB at 1000h (mask F0)
+  video pages A=6 B=7
+stick 1 x=33 y=25 live; btn=0; INT15 x=0 y=0 CF
+axes port 201h; deadzone +/-16/255 around 128; joystick 1 = bits 0,1
+Plug joystick 1 (first connector).  Centre, then SPACE on the
+title.  C opens calibrate.  Up = thrust, down = descend,
+left/right = tilt and translate.  Ctrl-A / Ctrl-V invert X / Y.
+Esc on the title quits to DOS.
+
+Flew with blit_rle_m8 + SN76496 + M9 presentation (M10 polish) on pages 6/7.  Sim 20 Hz (every 3 retraces).  Controls: Joystick.  Stick source this run: port 201h.
+Measured: 20 sim ticks / 60 retraces in 56 BIOS ticks = 6.50 Hz sim (target 20.00).
+
+PHASE ticks (BIOS, sum over run; ms approx):
+  sim_tick     3 (  165 ms)   present    37 ( 2032 ms)
+  flip         3 (  165 ms)   idle       13 (  714 ms)
+  sum 56 vs run_bios_ticks 56
+  restore      9 (  494 ms)   mountain     4 (  220 ms)
+  scenery      5 (  275 ms)   sprites     15 (  824 ms)
+  hud          4 (  220 ms)   sub-sum     37 (present    37)
+
+WORKSET byte counts (every sim present this run).  Not times.
+  sim ticks 20  scrolling 0  static 20
+                    min     avg     max
+  restore             0     872     976
+  rle blit          824     859    1080
+  video total      1399    1763    1832
+  avg mountain 126  scenery 167  sprites 597
+  restore is even-padded dirty-rect fill_rect bytes.
+  rle blit is skip-stripped payload (opaque + mixed bytes).
+  mountain includes the 320-byte band fill when the ridge
+  is repainted.  DESIGN.md section 7 ~3000/~320/~1500/~3000
+  is analysis; this table is what this run actually wrote.
+
+ANALYSIS -- M1.LOG rates x avg bytes, not a new hardware total.
+  restore  872 B * 2935 ns (fill_rect) = 2559 us
+  rle blit 859 B * 4515 ns (movsb)     = 3878 us
+  Do not add these into a replacement for section 7's ~26 ms.
+
+ZTIMER one present (restore+draw, HUD not included).
+  sim_frame 4  bytes restore 968  blit 830  video 1798
+  OVERFLOW -- interval exceeded ~54 ms; count is meaningless.
+PASS by eye: BIOS title, then Broderbund / logo / Gorlin /
+mission screens (SPACE skips), then chopper on the base pad.
+HUD rows 0-7: three 24x8 bubbles, two 5x7 digits each.  F1 or `
+toggles debug.  FIRST/SECOND/THIRD SORTIE art at sortie start.
+64 rescued: crown overlay then title.  64 killed or third crash:
+The End then title.  Esc on play or logos quits to DOS.  No
+full-screen copy in the sim loop, no trail, no flicker.
+WORKSET byte counts print after every flight.  On hardware add
+/ztimer /batch /frames=60 and do not touch the keyboard during
+the sample.  Stick 1 analog and SN76496 (port 61h gate) are
+the rest of the hardware pass; see docs/M10.md.

@@ -248,3 +248,64 @@ _fill_band_m8:
 
         pop     bp
         ret
+
+;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+; void __cdecl fill_rows_m8(unsigned dseg, unsigned xbyte, unsigned y,
+;                           unsigned wbytes, unsigned rows,
+;                           const unsigned *patterns);
+;
+; Like fill_rect_m8, but each scanline takes the next word from `patterns`
+; (DGROUP near pointer).  The sky dither is one repeating word per row;
+; calling fill_rect_m8 once per row paid a MUL and a far call every scanline.
+; wbytes must be even.  Caller guarantees the rect fits the screen.
+;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+        global  _fill_rows_m8
+_fill_rows_m8:
+        push    bp
+        mov     bp,sp
+        push    di
+        push    si
+        push    es
+        cld
+
+        mov     es,[bp+4]               ; dseg
+        mov     ax,[bp+8]               ; y
+        mov     di,ax
+        shr     ax,1
+        mov     bx,M8_ROW_BYTES
+        mul     bx
+        add     ax,[bp+6]               ; + xbyte
+        mov     bx,ax                   ; pair base
+
+        mov     cx,[bp+12]              ; rows
+        jcxz    .fr_done
+        mov     si,[bp+14]              ; patterns
+        mov     dx,cx                   ; rows remaining
+
+        test    di,1
+        jnz     .fr_odd
+
+.fr_even:
+        lodsw                           ; pattern for this scanline
+        mov     di,bx
+        mov     cx,[bp+10]
+        shr     cx,1
+        rep     stosw
+        dec     dx
+        jz      .fr_done
+.fr_odd:
+        lodsw
+        lea     di,[bx+M8_BANK_STRIDE]
+        mov     cx,[bp+10]
+        shr     cx,1
+        rep     stosw
+        add     bx,M8_ROW_BYTES
+        dec     dx
+        jnz     .fr_even
+
+.fr_done:
+        pop     es
+        pop     si
+        pop     di
+        pop     bp
+        ret

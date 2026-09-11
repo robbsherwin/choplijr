@@ -6,21 +6,34 @@ emitted as src/sprdata.c.
 
 M3: the same flying-chopper frames as RLE rows for blit_rle_m8, emitted as
 src/sprdata_rle.c. Packed and RLE are separate objects so m2.exe does not
-carry the RLE set.
+carry the RLE set. Side-view and head-on/rotating chopper frames also get
+horizontally flipped even/odd RLE (`_fe` / `_fo`) so M10 can blit_rle_m8 a
+nose-left body instead of unpacking and mirroring in C every present. The
+original does this with a real-time signed shear (`jumpSetSpriteTilt` in
+choplifter.s) on one bitmap per tilt; this port pre-renders instead, so the
+mirror needs its own baked copy per frame -- chooseChopperSprite's "unify
+left/right cases" EOR/negate on ACCELX before indexing the tilt table is
+the same idea, just done once here instead of every present.
+
+M10 also emits sheared main-rotor RLE into sprdata_rle.c only (not packed
+sprdata.c): 3 ink frames × 11 tilts × flip, even/odd, cropped to ink.
+m10.c blits those with hub-relative origins instead of plot_px.
 
 M4: scenery (mountains, barracks, base, fence, flag) as RLE even/odd copies
 in src/sprdata_world.c, linked only into m4.exe and later spikes.
 
 M6: hostage run / wave / load frames as RLE even/odd copies in
 src/sprdata_host.c, linked only into m6.exe.  Widened to 8x11 (DESIGN.md
-section 6); index 15 (white).
+section 6); index 15 (white).  Flipped even/odd (`_fe` / `_fo`) for
+left-facing run/wave/load.
 
 M7: combat art in src/sprdata_combat.c (jets even-only, tanks even-only,
 bullets even/odd, explosions, burning house, saucer).  Linked into m7.exe.
+Jets get a flipped even copy (`_fe`); the missile gets flipped even/odd.
 
 M9: title / sortie / win-lose art in src/sprdata_title.c (even-X only,
 index 15 white).  HUD digits and the 24x8 counter bubbles are new art in
-m9.c, not conversions (DESIGN.md section 6).
+m9.c / m10.c, not conversions (DESIGN.md section 6).
 
 Reads CHOPGFX through extract_chopgfx.py (no PIL). Each sprite:
   - width_px, height_px, then payload
@@ -143,11 +156,11 @@ COMBAT_BULLETS = (
 # bubbles are new art in m9.c (DESIGN.md section 6).  xy_scale 1.5 is a
 # readability bump for the small title/sortie text; the Choplifter logo
 # and win/lose art stay at the aspect-correct 1.0.  Broderbund is Apple
-# 220 px, so 1.5× is clamped to the 160 px mode-8 width.
+# 220 px: 1.5× would clamp to 160, so it sits at 1.25× instead.
 TITLE = (
     ("titleGraphics_00",  "title_mission",     1.5),
     ("titleGraphics_01",  "title_logo",        1.0),
-    ("titleGraphics_02",  "title_broderbund",  1.5),
+    ("titleGraphics_02",  "title_broderbund",  1.25),
     ("titleGraphics_03",  "title_gorlin",      1.5),
     ("titleGraphics_04",  "title_the_end",     1.0),
     ("titleGraphics_05",  "title_crown",       1.0),
@@ -400,6 +413,143 @@ def preshift_odd(pix):
     return out
 
 
+def flip_pix(pix):
+    """Horizontal mirror; even width stays even, then re-pack / re-RLE."""
+    return [list(reversed(row)) for row in pix]
+
+
+# Apple renderTiltedSprite shear, matching m10.c's former plot_px path.
+# C toward-zero divide (Watcom / C99); Python // floors negatives.
+ROTOR_SHEAR_W = 22
+ROTOR_SHEAR_HUB = 11
+ROTOR_SHEAR_SIGN = (1, 1, 1, 1, 1, 0, -1, -1, -1, -1, -1)
+ROTOR_SHEAR_PERIOD = (3, 4, 5, 10, 13, 1, 13, 10, 5, 4, 3)
+ROTOR_SHEAR_INK0 = (3, 9, 0)
+ROTOR_SHEAR_INK1 = (14, 20, 22)
+
+
+def c_div_toward_zero(a, b):
+    if b == 0:
+        return 0
+    if a < 0:
+        return -((-a) // b)
+    return a // b
+
+
+def shear_rotor_pix(frame, tilt_i, flip):
+    """Ink-cropped rotor disc; ox/oy are pixel offsets from the hub."""
+    i0 = ROTOR_SHEAR_INK0[frame]
+    i1 = ROTOR_SHEAR_INK1[frame]
+    t = tilt_i
+    if flip:
+        tmp = ROTOR_SHEAR_W - i1
+        i1 = ROTOR_SHEAR_W - i0
+        i0 = tmp
+        t = 10 - tilt_i
+    sign = ROTOR_SHEAR_SIGN[t]
+    period = ROTOR_SHEAR_PERIOD[t]
+    pts = []
+    for sx in range(i0, i1):
+        dx = sx - ROTOR_SHEAR_HUB
+        dy = 0
+        if sign != 0 and period != 0:
+            dy = c_div_toward_zero(sign * dx, period)
+        pts.append((ROTOR_SHEAR_HUB + dx, dy))
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    w = maxx - minx + 1
+    if w & 1:
+        w += 1
+    h = maxy - miny + 1
+    pix = [[0] * w for _ in range(h)]
+    for x, y in pts:
+        pix[y - miny][x - minx] = IDX_ROTOR
+    ox = minx - ROTOR_SHEAR_HUB
+    oy = miny
+    return pix, ox, oy
+
+
+def emit_sheared_rotor_rle():
+    """3×11×flip even/odd RLE plus hub origins. sprdata_rle.c only."""
+    chunks = []
+    even_names = [[[None] * 11 for _ in range(3)] for _ in range(2)]
+    odd_names = [[[None] * 11 for _ in range(3)] for _ in range(2)]
+    ox_tab = [[[0] * 11 for _ in range(3)] for _ in range(2)]
+    oy_tab = [[[0] * 11 for _ in range(3)] for _ in range(2)]
+    total = 0
+    chunks.append(
+        "\n/* Sheared main rotor (M10).  Same ink spans and C toward-zero\n"
+        " * shear as the old plot_px path.  Cropped to ink so blit_at's\n"
+        " * dirty rect is tight.  ox/oy are signed pixel offsets from the\n"
+        " * hub.  Packed sprdata.c does not carry these tables.\n"
+        " */\n"
+    )
+    for flip in (0, 1):
+        tag = "f" if flip else ""
+        for frame in range(3):
+            for tilt in range(11):
+                pix, ox, oy = shear_rotor_pix(frame, tilt, flip)
+                w = len(pix[0])
+                h = len(pix)
+                even_rle = encode_sprite_rle(w, h, pack_rows(pix))
+                odd_pix = preshift_odd(pix)
+                odd_rle = encode_sprite_rle(w + 2, h, pack_rows(odd_pix))
+                ident_e = f"rotor_s_f{frame}_t{tilt:02d}_{tag}e"
+                ident_o = f"rotor_s_f{frame}_t{tilt:02d}_{tag}o"
+                even_names[flip][frame][tilt] = ident_e
+                odd_names[flip][frame][tilt] = ident_o
+                ox_tab[flip][frame][tilt] = ox
+                oy_tab[flip][frame][tilt] = oy
+                total += len(even_rle) + len(odd_rle)
+                preview = ascii_preview(pix)
+                preview_c = "\n".join(" *   " + line for line in preview)
+                chunks.append(
+                    f"/* sheared rotor frame {frame} tilt {tilt}"
+                    f"{' flipped' if flip else ''}; "
+                    f"{w}x{h}; hub ox={ox} oy={oy}.\n"
+                    f"{preview_c}\n"
+                    f" */\n"
+                )
+                chunks.append(emit_rle_array(ident_e, even_rle))
+                chunks.append("\n")
+                chunks.append(emit_rle_array(ident_o, odd_rle))
+                chunks.append("\n")
+
+    def ptr_table(ident, names):
+        rows = []
+        for frame in range(3):
+            inner = ", ".join(names[frame])
+            rows.append("    { " + inner + " }")
+        return (
+            f"unsigned char *{ident}[3][11] = {{\n"
+            + ",\n".join(rows)
+            + "\n};\n"
+        )
+
+    def origin_table(ident, tab):
+        rows = []
+        for frame in range(3):
+            inner = ", ".join(str(v) for v in tab[frame])
+            rows.append("    { " + inner + " }")
+        return (
+            f"signed char {ident}[3][11] = {{\n"
+            + ",\n".join(rows)
+            + "\n};\n"
+        )
+
+    chunks.append(ptr_table("rotor_tilt_e", even_names[0]))
+    chunks.append(ptr_table("rotor_tilt_o", odd_names[0]))
+    chunks.append(ptr_table("rotor_tilt_fe", even_names[1]))
+    chunks.append(ptr_table("rotor_tilt_fo", odd_names[1]))
+    chunks.append(origin_table("rotor_tilt_ox", ox_tab[0]))
+    chunks.append(origin_table("rotor_tilt_oy", oy_tab[0]))
+    chunks.append(origin_table("rotor_tilt_fox", ox_tab[1]))
+    chunks.append(origin_table("rotor_tilt_foy", oy_tab[1]))
+    return "".join(chunks), total
+
+
 def ascii_preview(pix):
     glyphs = {0: ".", 2: "d", 3: "c", 4: "R", 5: "J", 7: "+", 8: "M",
               10: "#", 13: "A", 14: "Y", 15: "="}
@@ -457,6 +607,9 @@ def convert_one(mem, name, role, colour=0, widen=True, colour_hi=None,
     even_pack = pack_rows(pix)
     odd_pix = preshift_odd(pix)
     odd_pack = pack_rows(odd_pix)
+    fpix = flip_pix(pix)
+    even_pack_f = pack_rows(fpix)
+    odd_pack_f = pack_rows(preshift_odd(fpix))
     return {
         "name": name,
         "apple_w": w,
@@ -469,6 +622,8 @@ def convert_one(mem, name, role, colour=0, widen=True, colour_hi=None,
         "odd_pack": odd_pack,
         "even_rle": encode_sprite_rle(dst_w, dst_h, even_pack),
         "odd_rle": encode_sprite_rle(dst_w + 2, dst_h, odd_pack),
+        "even_rle_f": encode_sprite_rle(dst_w, dst_h, even_pack_f),
+        "odd_rle_f": encode_sprite_rle(dst_w + 2, dst_h, odd_pack_f),
         "flattened": dither >= FLATTEN_DITHER,
         "dither": dither,
     }
@@ -536,17 +691,26 @@ def main():
  * opaque run (REP MOVSB).  run_bytes == 1 is one byte, possibly a mixed
  * nibble edge.  Trailing transparency is implicit.  Index 0 transparent,
  * 15 body, 7 topside, 15 rotor.
+ *
+ * Side-view and head-on/rotating frames also have horizontally flipped
+ * even/odd RLE (_fe / _fo) so a nose-left body is blit_rle_m8, not a
+ * per-present unpack or mirror.
+ *
+ * M10 sheared main-rotor frames (3 ink x 11 tilt x flip, even/odd) follow
+ * the pointer tables.  Packed sprdata.c does not get those arrays.
  */
 """)
 
-    view_e = []
-    view_o = []
     tables = []
+    rle_flip_tables = []
 
     idx = 0
     for prefix, count, role, cprefix in GROUPS:
         even_names = []
         odd_names = []
+        fe_names = []
+        fo_names = []
+        emit_flip = cprefix in ("chopper_side", "chopper_head")
         for i in range(count):
             spr = converted[idx][1]
             idx += 1
@@ -554,8 +718,6 @@ def main():
             ident_o = f"{cprefix}_{i:02d}_o"
             even_names.append(ident_e)
             odd_names.append(ident_o)
-            view_e.append(ident_e)
-            view_o.append(ident_o)
             preview = ascii_preview(spr["pix"])
             preview_c = "\n".join(" *   " + line for line in preview)
             extra = ""
@@ -581,6 +743,19 @@ def main():
             rle_chunks.append("\n")
             rle_chunks.append(emit_rle_array(ident_o, spr["odd_rle"]))
             rle_chunks.append("\n")
+            if emit_flip:
+                ident_fe = f"{cprefix}_{i:02d}_fe"
+                ident_fo = f"{cprefix}_{i:02d}_fo"
+                fe_names.append(ident_fe)
+                fo_names.append(ident_fo)
+                rle_chunks.append(
+                    f"/* {spr['name']} horizontally flipped; even/odd "
+                    f"pre-shifts for blit_rle_m8. */\n"
+                )
+                rle_chunks.append(emit_rle_array(ident_fe, spr["even_rle_f"]))
+                rle_chunks.append("\n")
+                rle_chunks.append(emit_rle_array(ident_fo, spr["odd_rle_f"]))
+                rle_chunks.append("\n")
 
         tables.append(
             f"unsigned char *{cprefix}_e[{count}] = {{\n"
@@ -592,18 +767,25 @@ def main():
             + ",\n".join(f"    {n}" for n in odd_names)
             + "\n};\n"
         )
+        if emit_flip:
+            rle_flip_tables.append(
+                f"unsigned char *{cprefix}_fe[{count}] = {{\n"
+                + ",\n".join(f"    {n}" for n in fe_names)
+                + "\n};\n"
+            )
+            rle_flip_tables.append(
+                f"unsigned char *{cprefix}_fo[{count}] = {{\n"
+                + ",\n".join(f"    {n}" for n in fo_names)
+                + "\n};\n"
+            )
 
-    table_blob = "".join(tables) + "\n" + (
-        "unsigned char *chop_view_e[] = {\n"
-        + ",\n".join(f"    {n}" for n in view_e)
-        + "\n};\n\n"
-        "unsigned char *chop_view_o[] = {\n"
-        + ",\n".join(f"    {n}" for n in view_o)
-        + "\n};\n\n"
-        f"unsigned chop_view_count = {len(view_e)};\n"
-    )
+    table_blob = "".join(tables) + "\n"
     packed_chunks.append(table_blob)
     rle_chunks.append(table_blob)
+    if rle_flip_tables:
+        rle_chunks.append("\n" + "".join(rle_flip_tables))
+    shear_blob, shear_bytes = emit_sheared_rotor_rle()
+    rle_chunks.append(shear_blob)
 
     OUT_C.write_text("".join(packed_chunks).replace("\r\n", "\n"), encoding="ascii")
     OUT_RLE.write_text("".join(rle_chunks).replace("\r\n", "\n"), encoding="ascii")
@@ -623,6 +805,8 @@ def main():
               f"  packed {nbytes:4} B  rle {rbytes:4} B{flag}")
     print(f"  total packed+headers {total_pack} bytes  rle {total_rle} bytes  "
           f"{len(converted)} sprites")
+    print(f"  sheared rotor rle {shear_bytes} bytes  "
+          f"66 frames x even/odd (sprdata_rle.c only)")
 
     world = []
     world.append("""/* sprdata_world.c -- RLE scenery for M4 (blit_rle_m8).
@@ -692,7 +876,8 @@ def main():
  *
  * Running (4), waving (3), boarding (2).  Even/odd pre-shifts.
  * Index 0 transparent, 15 white.  Widened to 8x11 (DESIGN.md
- * section 6).  Linked only into m6.exe.
+ * section 6).  Linked only into m6.exe.  Flipped even/odd (_fe / _fo)
+ * for left-facing figures.
  */
 """)
     host_converted = []
@@ -700,14 +885,20 @@ def main():
     for prefix, count, cprefix in HOSTAGES:
         even_names = []
         odd_names = []
+        fe_names = []
+        fo_names = []
         for i in range(count):
             name = f"{prefix}_{i:02d}"
             spr = convert_one(mem, name, "host", colour=IDX_HOSTAGE, widen=True)
             host_converted.append((name, spr))
             ident_e = f"{cprefix}_{i:02d}_e"
             ident_o = f"{cprefix}_{i:02d}_o"
+            ident_fe = f"{cprefix}_{i:02d}_fe"
+            ident_fo = f"{cprefix}_{i:02d}_fo"
             even_names.append(ident_e)
             odd_names.append(ident_o)
+            fe_names.append(ident_fe)
+            fo_names.append(ident_fo)
             extra = ""
             if spr["flattened"]:
                 extra = " flattened isolated HGR pixels;"
@@ -725,6 +916,14 @@ def main():
             host.append("\n")
             host.append(emit_rle_array(ident_o, spr["odd_rle"]))
             host.append("\n")
+            host.append(
+                f"/* {spr['name']} horizontally flipped; even/odd "
+                f"pre-shifts for blit_rle_m8. */\n"
+            )
+            host.append(emit_rle_array(ident_fe, spr["even_rle_f"]))
+            host.append("\n")
+            host.append(emit_rle_array(ident_fo, spr["odd_rle_f"]))
+            host.append("\n")
         host_tables.append(
             f"unsigned char *{cprefix}_e[{count}] = {{\n"
             + ",\n".join(f"    {n}" for n in even_names)
@@ -733,6 +932,16 @@ def main():
         host_tables.append(
             f"unsigned char *{cprefix}_o[{count}] = {{\n"
             + ",\n".join(f"    {n}" for n in odd_names)
+            + "\n};\n"
+        )
+        host_tables.append(
+            f"unsigned char *{cprefix}_fe[{count}] = {{\n"
+            + ",\n".join(f"    {n}" for n in fe_names)
+            + "\n};\n"
+        )
+        host_tables.append(
+            f"unsigned char *{cprefix}_fo[{count}] = {{\n"
+            + ",\n".join(f"    {n}" for n in fo_names)
             + "\n};\n"
         )
     host.append("".join(host_tables))
@@ -756,6 +965,7 @@ def main():
  *
  * Jets (25) and tanks are even-X only (DESIGN.md section 6).  Bullets
  * have even/odd pre-shifts.  Index 0 transparent.  Linked into m7.exe.
+ * Jets have a flipped even copy (_fe); the missile has flipped even/odd.
  */
 """)
     combat_n = 0
@@ -763,11 +973,13 @@ def main():
 
     for prefix, count, colour, cprefix, widen in COMBAT_EVEN:
         even_names = []
+        fe_names = []
         hi = None
         if prefix == "jetMaster":
             hi = IDX_JET_HI
         elif prefix == "tankCannon":
             hi = IDX_TANK_HI
+        emit_flip = (prefix == "jetMaster")
         for i in range(count):
             name = f"{prefix}_{i:02d}"
             spr = convert_one(mem, name, "host", colour=colour, widen=widen,
@@ -790,11 +1002,27 @@ def main():
             combat.append("\n")
             combat_b += len(spr["even_rle"])
             combat_n += 1
+            if emit_flip:
+                ident_fe = f"{cprefix}_{i:02d}_fe"
+                fe_names.append(ident_fe)
+                combat.append(
+                    f"/* {spr['name']} horizontally flipped; even-only "
+                    f"for blit_rle_m8. */\n"
+                )
+                combat.append(emit_rle_array(ident_fe, spr["even_rle_f"]))
+                combat.append("\n")
+                combat_b += len(spr["even_rle_f"])
         combat.append(
             f"unsigned char *{cprefix}_e[{count}] = {{\n"
             + ",\n".join(f"    {n}" for n in even_names)
             + "\n};\n\n"
         )
+        if emit_flip:
+            combat.append(
+                f"unsigned char *{cprefix}_fe[{count}] = {{\n"
+                + ",\n".join(f"    {n}" for n in fe_names)
+                + "\n};\n\n"
+            )
 
     for name, colour, ident, widen, role in COMBAT_EVEN_ONE:
         hi = IDX_TANK_HI if name == "tank_00" else None
@@ -843,6 +1071,16 @@ def main():
         combat.append("\n")
         combat_b += len(spr["even_rle"]) + len(spr["odd_rle"])
         combat_n += 1
+        if cprefix == "bullet_missile":
+            combat.append(
+                f"/* {spr['name']} horizontally flipped; even/odd "
+                f"pre-shifts for blit_rle_m8. */\n"
+            )
+            combat.append(emit_rle_array(f"{cprefix}_fe", spr["even_rle_f"]))
+            combat.append("\n")
+            combat.append(emit_rle_array(f"{cprefix}_fo", spr["odd_rle_f"]))
+            combat.append("\n")
+            combat_b += len(spr["even_rle_f"]) + len(spr["odd_rle_f"])
 
     OUT_COMBAT.write_text("".join(combat).replace("\r\n", "\n"), encoding="ascii")
     print(f"wrote {OUT_COMBAT.relative_to(REPO)}")
@@ -854,8 +1092,9 @@ def main():
  * Generated by tools/build_sprites.py.  Do not hand-edit the arrays;
  * change the converter and re-run it.
  *
- * Even-X only, index 15 (white).  Linked into m9.exe.  HUD digits and the
- * 24x8 counter bubbles are new art in m9.c, not conversions.
+ * Even-X only, index 15 (white).  Linked into m9.exe and m10.exe.  HUD
+ * digits and the 24x8 counter bubbles are new art in m9.c / m10.c, not
+ * conversions.
  */
 """)
     title_b = 0

@@ -3,22 +3,23 @@
 # (scrolling world), M5 (flight: physics, 11-step tilt, joystick), M6
 # (hostages: spawn, board, unload, rescue counter), M7 (combat:
 # tanks, jets, saucers, bullets, death and sortie cycle), M8
-# (SN76496 effects with voice stealing) and M9 (HUD, title, sortie
-# banners, win and lose).
+# (SN76496 effects with voice stealing), M9 (HUD, title, sortie
+# banners, win and lose) and M10 (hardware validation, optimisation,
+# palette-effect tuning).
 #
 # For Open Watcom's wmake.  Toolchain per DESIGN.md section 12: Open Watcom
 # C/C++ V2 16-bit for logic, NASM for the primitives, wlink to put them
 # together, wmake to drive it.
 #
-#   wmake              build build\m1.exe through build\m9.exe
+#   wmake              build build\m1.exe through build\m10.exe
 #   wmake run          build, then launch DOSBox-X with a 128 KB PCjr config
 #   wmake run-dev      as above but with a roomier machine, for quick iteration
 #   wmake run-batch    128 KB PCjr, /batch /nogfx, captured to build\M1.LOG,
 #                      and DOSBox-X exits by itself
 #   wmake clean        remove build products
 #
-# Do not add a run-m2 ... run-m9 target that launches
-# the emulator unannounced.  M2-M9 are attended visuals; compile-only until
+# Do not add a run-m2 ... run-m10 target that launches
+# the emulator unannounced.  M2-M10 are attended visuals; compile-only until
 # someone is watching.
 #
 # Override any tool path on the command line, e.g.
@@ -78,17 +79,24 @@ M6      = $(BUILD)\m6.exe
 M7      = $(BUILD)\m7.exe
 M8      = $(BUILD)\m8.exe
 M9      = $(BUILD)\m9.exe
+M10     = $(BUILD)\m10.exe
 
 # -0     genuine 8086/8088 code generation.  The PCjr is an 8088; anything
 #        later would assemble instructions the machine does not have.
 # -ms    small model.  Required, not preferred: every asm routine is reached
 #        by a NEAR call, and the primitives take explicit segment/offset pairs
 #        rather than far pointers so the data model cannot change the ABI.
-# -os    optimise for size.  Nothing that gets timed is written in C, so there
-#        is no reason to trade size for speed here.
+# -ot    optimise for speed, not size.  M10's own Zen-timer overflow showed
+#        the present path is CPU-bound in C (dirty-rect bookkeeping, sprite
+#        dispatch, coordinate transforms), not memory-bandwidth-bound the way
+#        the M1 spike (only rep stosw/movsw) was -- see CLAUDE-THOUGHTS.md
+#        finding #4.  Measured +3.7% (81 vs 84 BIOS ticks) on the standard
+#        DOSBox-X pad log with zero source changes; not yet confirmed on real
+#        hardware.  Costs binary size (small-model DGROUP is a tight 64 KB
+#        cap) -- re-check the .map file's DGROUP size after touching this.
 # -w4    warnings on.  Worth reading: this code cannot be run on the machine
 #        it was written on, so the compiler is the only reviewer available.
-CFLAGS  = -0 -ms -os -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND)
+CFLAGS  = -0 -ms -ot -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND)
 
 # -f obj is the OMF object format wlink reads directly (DESIGN.md section 12).
 # Listings are kept because the assembly here has to be verified by reading,
@@ -104,8 +112,9 @@ M6OBJS  = $(BUILD)\m6.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(
 M7OBJS  = $(BUILD)\m7.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\sprdata_host.obj $(BUILD)\sprdata_combat.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
 M8OBJS  = $(BUILD)\m8.obj $(BUILD)\snd.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\sprdata_host.obj $(BUILD)\sprdata_combat.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
 M9OBJS  = $(BUILD)\m9.obj $(BUILD)\snd.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\sprdata_host.obj $(BUILD)\sprdata_combat.obj $(BUILD)\sprdata_title.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj
+M10OBJS = $(BUILD)\m10.obj $(BUILD)\snd.obj $(BUILD)\sprdata_rle.obj $(BUILD)\sprdata_world.obj $(BUILD)\sprdata_host.obj $(BUILD)\sprdata_combat.obj $(BUILD)\sprdata_title.obj $(BUILD)\pcjrvid.obj $(BUILD)\prims.obj $(BUILD)\dosmem.obj $(BUILD)\blit.obj $(BUILD)\stick.obj $(BUILD)\pztimer.obj
 
-all : $(M1) $(M2) $(M3) $(M4) $(M5) $(M6) $(M7) $(M8) $(M9) .SYMBOLIC
+all : $(M1) $(M2) $(M3) $(M4) $(M5) $(M6) $(M7) $(M8) $(M9) $(M10) .SYMBOLIC
 
 $(M1) : $(M1OBJS)
 	$(LINK) system dos name $(M1) option quiet option stack=8192 option map=$(BUILD)\m1.map file { $(M1OBJS) }
@@ -133,6 +142,9 @@ $(M8) : $(M8OBJS)
 
 $(M9) : $(M9OBJS)
 	$(LINK) system dos name $(M9) option quiet option stack=8192 option map=$(BUILD)\m9.map file { $(M9OBJS) }
+
+$(M10) : $(M10OBJS)
+	$(LINK) system dos name $(M10) option quiet option stack=8192 option map=$(BUILD)\m10.map file { $(M10OBJS) }
 
 $(BUILD)\m1.obj : $(SRC)\m1.c $(SRC)\pcjr.h
 	@if not exist $(BUILD) mkdir $(BUILD)
@@ -169,6 +181,10 @@ $(BUILD)\m8.obj : $(SRC)\m8.c $(SRC)\pcjr.h $(SRC)\snd.h
 $(BUILD)\m9.obj : $(SRC)\m9.c $(SRC)\pcjr.h $(SRC)\snd.h
 	@if not exist $(BUILD) mkdir $(BUILD)
 	$(CC) $(CFLAGS) -fo=$(BUILD)\m9.obj $(SRC)\m9.c
+
+$(BUILD)\m10.obj : $(SRC)\m10.c $(SRC)\pcjr.h $(SRC)\snd.h
+	@if not exist $(BUILD) mkdir $(BUILD)
+	$(CC) $(CFLAGS) -fo=$(BUILD)\m10.obj $(SRC)\m10.c
 
 $(BUILD)\snd.obj : $(SRC)\snd.c $(SRC)\snd.h
 	@if not exist $(BUILD) mkdir $(BUILD)

@@ -5,7 +5,8 @@
  * M4 scrolling world (camera lead, mountain parallax, scenery); M5 flight
  * (original physics, 11-step tilt, joystick); M6 hostages (spawn, board,
  * unload, rescue counter); M7 combat (tanks, jets, bullets, sorties);
- * M8 SN76496 effects; M9 presentation (HUD, title, banners, win/lose).
+ * M8 SN76496 effects; M9 presentation (HUD, title, banners, win/lose);
+ * M10 polish (hardware validation, optimisation, palette-effect tuning).
  * See DESIGN.md sections 3, 6, 7, 10, 11 and 13.
  *
  * Everything declared here is implemented in NASM under src/asm/.
@@ -178,6 +179,13 @@ void __cdecl fill_rect_m8(unsigned dseg, unsigned xbyte, unsigned y,
 void __cdecl fill_band_m8(unsigned dseg, unsigned y, unsigned rows,
                           unsigned pattern);
 
+/* fill_rect_m8 with a different word per scanline (DGROUP near pointer).
+ * Sky Bayer restores: one stosw pattern per row, one bank walk.  wbytes
+ * must be even. */
+void __cdecl fill_rows_m8(unsigned dseg, unsigned xbyte, unsigned y,
+                          unsigned wbytes, unsigned rows,
+                          const unsigned *patterns);
+
 /* Packed mode-8 masked blit (M2).  Source is row-major packed nibbles,
  * wbytes per row, index 0 transparent.  xbyte is a byte column.  Odd pixel
  * X is a second pre-shifted copy (leading transparent nibble) still blitted
@@ -190,9 +198,23 @@ void __cdecl blit_mask_m8(unsigned dseg, unsigned xbyte, unsigned y,
  * height_px, RLE rows }.  Each row is { skip, run, data[run] }* 0x00 0x00.
  * Opaque runs (run >= 2) are REP MOVSB; a 1-byte run is a store or a mixed
  * nibble RMW.  xbyte is a byte column; odd pixel X is a second pre-shifted
- * RLE copy.  Never a full-screen copy. */
-void __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
-                         unsigned sseg, unsigned soff);
+ * RLE copy.  Never a full-screen copy.  Returns the total run bytes (opaque
+ * + mixed) copied, counted as a side effect of the blit itself -- callers
+ * use this instead of a second C-side pass (rle_run_bytes) over the same
+ * RLE stream just to get a byte count for WORKSET/ZTIMER reporting. */
+unsigned __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
+                             unsigned sseg, unsigned soff);
+
+/* M10: same as blit_rle_m8, but every stored byte is passed through
+ * fire_tab (an XLATB lookup) first -- the yellow-to-fire recolour m10.c's
+ * fire_byte()/fire_nibble() do in C, fixed for blit_fire == 1 (the only
+ * value it is ever called with).  The remap never changes which nibbles are
+ * transparent, so the row structure and REP-vs-RMW split are identical to
+ * blit_rle_m8; an opaque run just can't be REP MOVSB since each byte needs
+ * the table lookup.  Not a clipped blitter -- same edge-of-screen caveat as
+ * blit_rle_m8.  Returns the same byte count as blit_rle_m8, same reason. */
+unsigned __cdecl blit_rle_m8_fire(unsigned dseg, unsigned xbyte, unsigned y,
+                                  unsigned sseg, unsigned soff);
 
 /* DGROUP segment.  Small-model near pointers are offsets from this. */
 unsigned __cdecl data_seg(void);

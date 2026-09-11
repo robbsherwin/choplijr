@@ -46,7 +46,14 @@ if (Test-Path $nasm_local) {
 # machine=pcjr is better supported here than in plain DOSBox, and plain DOSBox
 # cannot be configured down to 128 KB.  No DOSBox models the PCjr's memory
 # contention, so timings from it are a smoke test only -- see docs/M1.md.
-$env:DOSBOX = 'F:\_GAMES\Wizardry 6 in 7 Engine\dosbox-x.exe'
+# Prefer the in-tree copy: it is not shared with other projects, so its local
+# dosbox-x.conf (automount, etc.) cannot leak into a run here.
+$dosbox_local = Join-Path $repo 'lib\DOSBox-X\dosbox-x.exe'
+if (Test-Path $dosbox_local) {
+    $env:DOSBOX = $dosbox_local
+} else {
+    $env:DOSBOX = 'F:\_GAMES\Wizardry 6 in 7 Engine\dosbox-x.exe'
+}
 
 Write-Output "WATCOM = $env:WATCOM"
 Write-Output "NASM   = $env:NASM"

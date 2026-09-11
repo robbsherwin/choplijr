@@ -1,4 +1,5 @@
 lib/repos/*
+lib/DOSBox-X/
 tools/out/
 tools/bin/
 build/
