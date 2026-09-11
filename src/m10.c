@@ -66,8 +66,6 @@ extern signed char    rotor_tilt_foy[3][11];
 extern unsigned char *tail_rotor_e[4];
 extern unsigned char *tail_rotor_o[4];
 
-extern unsigned char *mountain_e[4];
-extern unsigned char *mountain_o[4];
 extern unsigned char *fence_e[5];
 extern unsigned char *fence_o[5];
 extern unsigned char  house_e[];
@@ -257,6 +255,20 @@ static unsigned long    ws_z_restore, ws_z_blit, ws_z_video;
 #define ET_SHELL        8
 #define ET_JET          9
 #define ET_ALIEN        10
+/* Alien/saucer shot (M10): visually distinct from ET_SHELL (tank shells
+ * use that type too) so tank difficulty/hitbox is untouched -- same
+ * physics and collision (update_shell, ordinance_check, both generic over
+ * entity geometry, not type), own 4x4 solid-square rendering.  Requested
+ * after the original's tiny 2x2 grey/orange dot (SHELL_C_GREY/ORANGE)
+ * proved hard to see in play. */
+#define ET_ALIEN_SHOT   11
+#define ALIEN_SHOT_PX       4U    /* screen px, both directions */
+#define ALIEN_SHOT_C_LIGHT  12    /* light red: fresh shot */
+#define ALIEN_SHOT_C_DARK   4     /* dark red: past ALIEN_SHOT_FADE_GROUND */
+/* e->ground - chop_ground grows by e->dir (3, ent_basic_phys) every tick
+ * this shot is alive, so it is already a free "ticks since spawn" signal
+ * with no new entity_t field needed -- ~8 ticks (0.4 s at 20 Hz) in. */
+#define ALIEN_SHOT_FADE_GROUND 24U
 #define MAX_SORTIE      3
 #define HST_FREE        0xFF
 #define HST_DIE         0x40            /* crush flash; choplifter.s $40 */
@@ -1920,23 +1932,13 @@ static void restore_rect(unsigned seg, const dirty_rect *d)
     }
 }
 
-/* Returns non-zero if any restored rect overlapped the mountain band, which
- * is the only reason to repaint mountains when the camera has not moved. */
-static int restore_list(unsigned seg, dirty_list *list)
+static void restore_list(unsigned seg, dirty_list *list)
 {
     unsigned i;
-    int      band_hit = 0;
 
-    for (i = 0; i < list->n; i++) {
-        const dirty_rect *d = &list->r[i];
-
-        if (d->y < (unsigned)(MOUNTAIN_ROW + 4)
-            && (unsigned)(d->y + d->rows) > (unsigned)MOUNTAIN_ROW)
-            band_hit = 1;
-        restore_rect(seg, d);
-    }
+    for (i = 0; i < list->n; i++)
+        restore_rect(seg, &list->r[i]);
     list->n = 0;
-    return band_hit;
 }
 
 /* A null list means "this blit is not restored per-rect": the mountain band
@@ -3370,7 +3372,8 @@ static void ent_basic_phys(int i, unsigned char grav)
 
 static void init_explosion(int i)
 {
-    unsigned char was_shell = (ents[i].type == ET_SHELL);
+    unsigned char was_shell = (ents[i].type == ET_SHELL ||
+                               ents[i].type == ET_ALIEN_SHOT);
 
     ents[i].vx = 0;
     ents[i].vy = 0;
@@ -4388,7 +4391,7 @@ static void update_alien(int i)
             return;
         if (rnd8() & 0x80U)
             vx = (signed char)(-vx);
-        ents[b].type = ET_SHELL;
+        ents[b].type = ET_ALIEN_SHOT;
         ents[b].x = e->x;
         ents[b].y = (unsigned char)(e->y + (unsigned char)e->vy);
         ents[b].ground = (unsigned char)chop_ground;
@@ -4529,7 +4532,7 @@ static void update_ents(void)
             update_alien(i);
         else if (t == ET_BULLET)
             update_bullet(i);
-        else if (t == ET_SHELL)
+        else if (t == ET_SHELL || t == ET_ALIEN_SHOT)
             update_shell(i);
         else if (t == ET_MISSILE)
             update_missile(i);
@@ -4545,6 +4548,39 @@ static void blit_aligned(unsigned seg, int x_px, int y, unsigned char *spr,
 {
     x_px &= ~1;
     blit_at(seg, x_px, y, spr, spr, list);
+}
+
+/* Procedural filled square (no RLE asset): sized/coloured per caller, used
+ * for the alien shot.  Clip and dirty-rect math mirror blit_at's own (same
+ * vis0/vis1 -> xbyte/wbytes derivation) since a plot_px loop has no other
+ * way to register what it touched. */
+static void draw_solid_square(unsigned seg, int sx, int sy, int w,
+                              unsigned char color, dirty_list *list)
+{
+    int x, y, x1, y1, vis_x0, vis_x1, vis_y0, vis_y1;
+    unsigned xb, wb;
+
+    x1 = sx + w;
+    y1 = sy + w;
+    if (x1 <= 0 || sx >= (int)M8_WIDTH_PX)
+        return;
+    if (y1 <= (int)HUD_ROWS || sy >= (int)M8_HEIGHT_PX)
+        return;
+
+    vis_x0 = (sx < 0) ? 0 : sx;
+    vis_x1 = (x1 > (int)M8_WIDTH_PX) ? (int)M8_WIDTH_PX : x1;
+    vis_y0 = (sy < (int)HUD_ROWS) ? (int)HUD_ROWS : sy;
+    vis_y1 = (y1 > (int)M8_HEIGHT_PX) ? (int)M8_HEIGHT_PX : y1;
+
+    for (y = vis_y0; y < vis_y1; y++)
+        for (x = vis_x0; x < vis_x1; x++)
+            plot_px(seg, (unsigned)x, (unsigned)y, color);
+
+    xb = (unsigned)vis_x0 / 2U;
+    wb = (unsigned)(vis_x1 + 1) / 2U - xb;
+    if (wb != 0U)
+        dirty_add(list, xb, (unsigned)vis_y0, wb,
+                  (unsigned)(vis_y1 - vis_y0));
 }
 
 static void draw_ents(unsigned seg, dirty_list *list)
@@ -4607,6 +4643,13 @@ static void draw_ents(unsigned seg, dirty_list *list)
             blit_at(seg, sx, sy, bullet_chop_e, bullet_chop_o, list);
         else if (e->type == ET_SHELL)
             blit_at(seg, sx, sy, tank_shell_e, tank_shell_o, list);
+        else if (e->type == ET_ALIEN_SHOT) {
+            unsigned char age = (unsigned char)(e->ground - chop_ground);
+            unsigned char col = (age < ALIEN_SHOT_FADE_GROUND)
+                                     ? ALIEN_SHOT_C_LIGHT : ALIEN_SHOT_C_DARK;
+
+            draw_solid_square(seg, sx, sy, (int)ALIEN_SHOT_PX, col, list);
+        }
         else if (e->type == ET_MISSILE) {
             if (e->vx < 0)
                 blit_at(seg, sx, sy, bullet_missile_fe, bullet_missile_fo,
@@ -5153,86 +5196,22 @@ static void blit_world(unsigned seg, unsigned wx, unsigned wy,
     blit_at(seg, world_to_sx(wx), world_to_sy(wy), even, odd, list);
 }
 
-/* Half-rate parallax: one screen pixel of ridge per two of camera. */
-static unsigned mountain_shift(void)
+/* Mountain band removed (docs/M10.md, CLAUDE-THOUGHTS.md): a flat 4-tile
+ * grey ridge with no peaks never read as motion, and cost ~17% of the
+ * whole frame budget by itself (M10-05.LOG). mountain_shift/draw_mountains/
+ * draw_mountains_dirty used to live here, tiling mountain_e/mountain_o
+ * (sprdata_world.c) across MOUNTAIN_ROW's 4-row band; band_solid() already
+ * treats that row range as a plain solid-8 band for restore purposes, so
+ * removing the retile left nothing else to fix here. */
+
+static int any_house_burning(void)
 {
-    unsigned period;
-    int      i;
+    unsigned h;
 
-    period = 0;
-    for (i = 0; i < 4; i++)
-        period += mountain_e[i][0];
-    if (period == 0U)
-        return 0xFFFFU;
-    return (scroll_x >> 2) % period;
-}
-
-/* Tile the four 4-row CHOPGFX patterns across the 160-px window.  The ridge
- * spans the whole band, so a camera move clears the band wholesale; these
- * blits stay out of the sprite dirty list. */
-static void draw_mountains(unsigned seg, unsigned shift)
-{
-    int x, i, w;
-    unsigned n;
-
-    if (shift == 0xFFFFU)
-        return;
-    ws_kind = WS_K_MTN;
-    ws_t_mtn_fill += 4UL * (unsigned long)M8_BYTES_PER_ROW;
-    fill_band_m8(seg, MOUNTAIN_ROW, 4, M8_SOLID(8));
-    x = -(int)shift;
-    i = 0;
-    while (x < (int)M8_WIDTH_PX) {
-        w = (int)mountain_e[i][0];
-        /* blit_mtn_fast (src/asm/blit.asm) skips blit_at's C-side dispatch
-         * for the common on-screen case; !opt_forceclip/!opt_forcefire keep
-         * both debug flags exercising blit_at's real clip/fire paths the
-         * way they always have.  0xFFFF means "needs the slow path" (edge
-         * tile, or a flag forced it) -- blit_at still does that, unchanged,
-         * so the one clipping implementation is never duplicated. */
-        n = 0xFFFFU;
-        if (!opt_forceclip && !opt_forcefire)
-            n = blit_mtn_fast(seg, x, (unsigned)MOUNTAIN_ROW,
-                              (unsigned)mountain_e[i], (unsigned)mountain_o[i]);
-        if (n != 0xFFFFU) {
-            if (!opt_noworkset)
-                ws_add_blit(n);
-        } else {
-            blit_at(seg, x, (int)MOUNTAIN_ROW, mountain_e[i], mountain_o[i], 0);
-        }
-        x += w;
-        i++;
-        if (i >= 4)
-            i = 0;
-    }
-    ws_kind = WS_K_SPRITE;
-}
-
-/* Still camera: restore already filled the dirty span.  Retile only tiles
- * that overlap it; do not wipe the whole 160x4 band. */
-static void draw_mountains_dirty(unsigned seg, unsigned shift,
-                                 const dirty_rect *hit, unsigned nhit)
-{
-    int x, i, w, sy;
-    dirty_bbox bb;
-
-    if (shift == 0xFFFFU || nhit == 0U)
-        return;
-    ws_kind = WS_K_MTN;
-    sy = (int)MOUNTAIN_ROW;
-    dirty_bbox_calc(&bb, hit, nhit);
-    x = -(int)shift;
-    i = 0;
-    while (x < (int)M8_WIDTH_PX) {
-        w = (int)mountain_e[i][0];
-        if (spr_hits_dirty(x, sy, mountain_e[i], hit, nhit, &bb))
-            blit_at(seg, x, sy, mountain_e[i], mountain_o[i], 0);
-        x += w;
-        i++;
-        if (i >= 4)
-            i = 0;
-    }
-    ws_kind = WS_K_SPRITE;
+    for (h = 0; h < N_HOUSES; h++)
+        if (house_states[h])
+            return 1;
+    return 0;
 }
 
 static void draw_houses(unsigned seg, dirty_list *list, int full,
@@ -5768,7 +5747,6 @@ static int combat_tick_p(void)
 static void run_viewer(void)
 {
     unsigned long t0;
-    unsigned   last_shift[2];
     int        back;
     unsigned   back_seg;
     unsigned   i;
@@ -5790,8 +5768,6 @@ static void run_viewer(void)
     scenery_invalidate();
     last_flag_bit[0] = last_flag_bit[1] = 0xFF;
     last_fire_bit[0] = last_fire_bit[1] = 0xFF;
-    last_shift[0] = 0xFFFEU;
-    last_shift[1] = 0xFFFEU;
     hud_pg_mode[0] = hud_pg_mode[1] = 0;
     scroll_x = SCROLL_START;
     init_helicopter();
@@ -5840,11 +5816,8 @@ static void run_viewer(void)
         }
 
         if ((i % SIM_DIV) == 0U) {
-            unsigned shift;
             unsigned prev_scroll;
             unsigned old_n;
-            unsigned old_sc;
-            int      band_hit;
             int      scrolled;
             int      full_sc;
             int      do_z;
@@ -5881,13 +5854,40 @@ static void run_viewer(void)
                 ztimer_on();
 
             old_n = lists[back].n;
-            old_sc = scenery_mark[back].n;
-            band_hit = restore_list(back_seg, &lists[back]);
+            restore_list(back_seg, &lists[back]);
             draw_stars_and_moon(back_seg, lists[back].r, old_n);
 
             full_sc = scrolled || scenery_full[back];
-            if (full_sc)
-                band_hit |= restore_list(back_seg, &scenery_mark[back]);
+            if (full_sc) {
+                restore_list(back_seg, &scenery_mark[back]);
+            } else if (any_house_burning()) {
+                /* A burning house's flame frame changes every 4 sim ticks
+                 * (draw_houses' fire_bit) whether or not the camera moves.
+                 * house_fire_00_e/_01_e do not share the same opaque
+                 * silhouette, so drawing the new frame straight over the
+                 * old one leaves a stale fragment RLE transparency cannot
+                 * erase -- only a background restore can, and this is the
+                 * only place one happens on this page. Previously that
+                 * restore only ran on the *next* real scroll (docs/M10.md
+                 * item 5's first fix), which is fine for "fly past and
+                 * back" but not when the camera barely moves (hovering /
+                 * rapid direction reversal near the barracks): several
+                 * flame flips can stack up, unrestored, before scrolling
+                 * ever resumes. Restoring scenery_mark[back]'s already-
+                 * tracked flame footprint here, on the same tick
+                 * draw_houses independently notices fire_changed and
+                 * redraws that one house, closes the gap without forcing
+                 * full_sc's much bigger unconditional redraw of every
+                 * house/fence/base -- house 3 starts burning from sortie 1
+                 * (see next_sortie/init_hostages), so that would otherwise
+                 * run every 4 ticks for most of a normal game, not the
+                 * rare case this fix was scoped for. any_house_burning()
+                 * keeps this check itself free whenever nothing is lit. */
+                unsigned char fb = (unsigned char)((sim_frame / 4U) & 1U);
+
+                if (fb != last_fire_bit[back])
+                    restore_list(back_seg, &scenery_mark[back]);
+            }
 
             if (opt_phases) {
                 tp0 = bios_ticks();
@@ -5896,22 +5896,18 @@ static void run_viewer(void)
                     cph_restore += tp0 - tp1;
             }
 
-            /* Static camera and nothing erased over the ridge: the band on
-             * this page is already right.  A camera move that changes
-             * parallax still retile-fills the whole strip. */
-            shift = mountain_shift();
-            if (shift != last_shift[back]) {
-                draw_mountains(back_seg, shift);
-                last_shift[back] = shift;
-            } else if (band_hit) {
-                if (old_n != 0U)
-                    draw_mountains_dirty(back_seg, shift, lists[back].r,
-                                         old_n);
-                if (full_sc && old_sc != 0U)
-                    draw_mountains_dirty(back_seg, shift,
-                                         scenery_mark[back].r, old_sc);
-            }
-
+            /* Mountain band removed (flat 4-tile grey ridge, no peaks --
+             * never read as motion, ~17% of the whole frame budget by
+             * itself per docs/TIMINGS.md's combat-window capture,
+             * M10-05.LOG). band_solid() already treats this row range as
+             * a plain solid-8 band for restore purposes, same as the sky
+             * and ground bands, so there is nothing left to draw here:
+             * paint_world's initial fill is the whole story, and
+             * restore_rect repaints it correctly whenever something
+             * crosses it, exactly like any other solid band. Kept the
+             * ph_mountain/cph_mountain brackets below (opt_phases only,
+             * zero cost otherwise) as a standing check that this stays at
+             * ~0 rather than silently regressing. */
             if (opt_phases) {
                 tp1 = bios_ticks();
                 ph_mountain += tp1 - tp0;
