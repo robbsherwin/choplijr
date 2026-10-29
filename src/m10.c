@@ -6,8 +6,9 @@
  * go through blit_rle_m8; sheared main-rotor frames are the same (3 ink
  * x 11 tilt x flip, cropped to ink); sky dither is one fill_rows_m8 walk;
  * stars/moon only redraw in restored rects.  Static camera restamps scenery
- * and ridge tiles only where restore punched holes; a scroll still reblits
- * visible scenery and records it for the next restore.
+ * only where restore punched holes (the mountain ridge band is gone, see
+ * docs/M10.md); a scroll still reblits visible scenery and records it for
+ * the next restore.
  * Palette cycling is still ahead.  No attract loop (section 15).
  * Title PVM music is still optional and not here.
  * No Playdate rope: boarding is land-and-run, as in choplifter.s.
@@ -141,7 +142,6 @@ static int      opt_stick       = 0;        /* print raw min/max/now */
 static int      stick_force     = 0;        /* 0 auto, 1 port201, 2 int15 */
 static unsigned opt_frames      = 0;        /* 0 = until Esc */
 static unsigned opt_ztimer      = 0;        /* sim_frame to sample; 0 = off */
-static unsigned opt_retrace     = 0;        /* retrace-probe length; 0 = off */
 static int      opt_forceclip   = 0;        /* debug: every blit_at takes
                                               * blit_rle_clip, not blit_rle_m8.
                                               * Not a real mode -- isolates the
@@ -170,8 +170,6 @@ static int      opt_phases      = 0;        /* off by default: the ph_*
                                               * back, otherwise none of that
                                               * overhead runs at all -- not
                                               * even during ordinary play. */
-
-#define RETRACE_DEFAULT 180U            /* 3 s if a field costs one field */
 
 /* Workset (DESIGN.md section 7 / 14).  Byte counts every sim present.
  * /ztimer wraps restore+draw of one present with the Zen timer.  Derived
@@ -323,7 +321,7 @@ static unsigned long    ws_z_restore, ws_z_blit, ws_z_video;
 #define SCAN_LSHIFT     0x2A
 #define SCAN_C          0x2E
 #define SCAN_V          0x2F
-#define SCAN_P          0x19            /* debug: first barracks */
+#define SCAN_P          0x19            /* debug: first barracks (DEBUG_KEYS) */
 #define SCAN_PERIOD     0x34
 #define SCAN_SLASH      0x35
 #define SCAN_ALT        0x38
@@ -534,7 +532,9 @@ static entity_t         ents[MAX_ENT];
 /* HUD rows 0-7: K/A/R counts.  F1 or ` swaps in the M5 debug line. */
 static unsigned char    hud_on = 0;
 static unsigned char    hud_prev_tog;
+#ifdef DEBUG_KEYS
 static unsigned char    dbg_prev_p;
+#endif
 /* What each page's HUD band already shows.  Repainting it is 640 bytes of
  * video plus per-pixel glyph RMW; the counts change a few times a sortie. */
 static unsigned char    hud_pg_mode[2];         /* 0 = unknown/debug, 1 = counts */
@@ -5312,6 +5312,7 @@ static void murder_aboard(void)
  * (x + blit_world_w <= scroll_x), chopper on-screen at left lead.
  * Face left so airborne velx=0 uses the lead window and the camera
  * does not walk toward right-lead (that would reveal the house). */
+#ifdef DEBUG_KEYS
 static void debug_teleport_first_barracks(void)
 {
     unsigned house_w;
@@ -5336,6 +5337,7 @@ static void debug_teleport_first_barracks(void)
     chop_face = -1;
     turn_request = 0;
 }
+#endif /* DEBUG_KEYS */
 
 static void next_sortie(void)
 {
@@ -6067,7 +6069,9 @@ static void run_viewer(void)
         apply_debug_state();
     banner_left = BANNER_TICKS;
     hud_prev_tog = 0;
+#ifdef DEBUG_KEYS
     dbg_prev_p = 1;             /* ignore P held through SPACE */
+#endif
     hud_on = 0;
     dbg_xmin = dbg_ymin = 0xFFFFU;
     dbg_xmax = dbg_ymax = 0;
@@ -6105,9 +6109,15 @@ static void run_viewer(void)
             if (tog && !hud_prev_tog)
                 hud_on = (unsigned char)(hud_on ^ 1U);
             hud_prev_tog = (unsigned char)tog;
+#ifdef DEBUG_KEYS
+            /* P teleports to the first barracks.  Built in by default
+             * (makefile CFLAGS -dDEBUG_KEYS); drop that flag for a build
+             * where a stray P mid-sortie must not move the player
+             * (FIXES.md 3.2). */
             if (kbd_is_down(SCAN_P) && !dbg_prev_p)
                 debug_teleport_first_barracks();
             dbg_prev_p = (unsigned char)(kbd_is_down(SCAN_P) ? 1 : 0);
+#endif
         }
 
         if ((i % SIM_DIV) == 0U) {
