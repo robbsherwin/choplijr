@@ -51,10 +51,10 @@ _blit_mask_m8:
 
         mov     es,[bp+4]               ; dseg
         mov     ax,[bp+8]               ; y
-        mov     di,ax
-        shr     ax,1
-        mov     bx,M8_ROW_BYTES
-        mul     bx                      ; (y >> 1) * 80
+        mov     di,ax                   ; parity tested below
+        mov     bx,ax
+        and     bx,0xFFFE               ; (y >> 1) * 2: word index
+        mov     ax,[cs:rowpair_tab+bx]  ; (y >> 1) * 80
         add     ax,[bp+6]               ; + xbyte
         mov     bx,ax                   ; pair base
 
@@ -173,10 +173,10 @@ _blit_rle_m8:
 
         mov     es,[bp+4]               ; dseg
         mov     ax,[bp+8]               ; y
-        mov     di,ax
-        shr     ax,1
-        mov     bx,M8_ROW_BYTES
-        mul     bx                      ; (y >> 1) * 80
+        mov     di,ax                   ; parity tested below
+        mov     bx,ax
+        and     bx,0xFFFE               ; (y >> 1) * 2: word index
+        mov     ax,[cs:rowpair_tab+bx]  ; (y >> 1) * 80
         add     ax,[bp+6]               ; + xbyte
         mov     bx,ax                   ; pair base
 
@@ -311,10 +311,10 @@ _blit_rle_m8_fire:
 
         mov     es,[bp+4]               ; dseg
         mov     ax,[bp+8]               ; y
-        mov     di,ax
-        shr     ax,1
-        mov     bx,M8_ROW_BYTES
-        mul     bx                      ; (y >> 1) * 80
+        mov     di,ax                   ; parity tested below
+        mov     bx,ax
+        and     bx,0xFFFE               ; (y >> 1) * 2: word index
+        mov     ax,[cs:rowpair_tab+bx]  ; (y >> 1) * 80
         add     ax,[bp+6]               ; + xbyte
         mov     bx,ax                   ; pair base
 
@@ -444,3 +444,15 @@ fire_tab:
         db      0x40,0xC1,0xE2,0x43,0xC4,0xE5,0x46,0xC7,0xE8,0x49,0xCA,0xEB,0x4C,0xCD,0xE4,0x4F        ; E0h-EFh
         db      0xF0,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA,0xFB,0xFC,0xFD,0xFC,0xFF        ; F0h-FFh
 
+; (y >> 1) * 80 for every row pair 0..99: the bank-relative base of a
+; mode-8 scanline pair.  Each blit and fill used to compute this with a
+; MUL (118-133 clocks on an 8088, plus fetching it); a CS-relative word
+; lookup is a fraction of that (analysis, not measured -- FIXES.md 2.3).
+; Callers already guarantee y < 200.
+        align   2
+rowpair_tab:
+%assign i 0
+%rep 100
+        dw      i * M8_ROW_BYTES
+%assign i i+1
+%endrep
