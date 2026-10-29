@@ -178,12 +178,12 @@ _fill_rect_m8:
 
         mov     es,[bp+4]               ; dseg
         mov     ax,[bp+8]               ; y
-        mov     di,ax                   ; stash y; MUL is about to eat DX
-        shr     ax,1                    ; y >> 1, the row-pair index
-        mov     bx,M8_ROW_BYTES
-        mul     bx                      ; dx:ax = (y >> 1) * 80, dx = 0
+        mov     di,ax                   ; parity tested below
+        mov     bx,ax
+        and     bx,0xFFFE               ; (y >> 1) * 2: word index
+        mov     ax,[cs:rowpair_tab+bx]  ; (y >> 1) * 80
         add     ax,[bp+6]               ; + xbyte
-        mov     bx,ax                   ; bx = bank-relative base of this pair
+        mov     bx,ax                   ; pair base
 
         mov     si,[bp+10]              ; wbytes
         shr     si,1                    ; -> words per row
@@ -270,10 +270,10 @@ _fill_rows_m8:
 
         mov     es,[bp+4]               ; dseg
         mov     ax,[bp+8]               ; y
-        mov     di,ax
-        shr     ax,1
-        mov     bx,M8_ROW_BYTES
-        mul     bx
+        mov     di,ax                   ; parity tested below
+        mov     bx,ax
+        and     bx,0xFFFE               ; (y >> 1) * 2: word index
+        mov     ax,[cs:rowpair_tab+bx]  ; (y >> 1) * 80
         add     ax,[bp+6]               ; + xbyte
         mov     bx,ax                   ; pair base
 
@@ -309,3 +309,16 @@ _fill_rows_m8:
         pop     di
         pop     bp
         ret
+
+; (y >> 1) * 80 for every row pair 0..99: the bank-relative base of a
+; mode-8 scanline pair.  Each blit and fill used to compute this with a
+; MUL (118-133 clocks on an 8088, plus fetching it); a CS-relative word
+; lookup is a fraction of that (analysis, not measured -- FIXES.md 2.3).
+; Callers already guarantee y < 200.
+        align   2
+rowpair_tab:
+%assign i 0
+%rep 100
+        dw      i * M8_ROW_BYTES
+%assign i i+1
+%endrep
