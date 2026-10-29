@@ -260,9 +260,15 @@ void          __cdecl poke_word(unsigned seg, unsigned off, unsigned val);
 
 /* ------------------------------------------------------------- src/asm/stick.asm */
 
-/* Paku Paku 1.6a JOYSTICK.PAS: timeout CX=$7FFF.  Must match stick.asm.
- * Near-timeout counts (unconnected bits stuck high) are not a live stick. */
-#define STICK_TIMEOUT   0x7FFFU
+/* Counting-loop timeout.  Must match stick.asm.  Paku Paku 1.6a
+ * JOYSTICK.PAS used CX=$7FFF; a real pot on the 558 discharges in about a
+ * millisecond, which is a count in the low hundreds at 4.77 MHz, so 0x0FFF
+ * is still an order of magnitude above any live reading while an
+ * unconnected axis (bits stuck high) costs an eighth of what it did -- the
+ * loop runs with interrupts off, and the old timeout stalled the sim for a
+ * sizeable fraction of a second per dead probe (FIXES.md 1.4; that figure
+ * is analysis, measure it).  Near-timeout counts are not a live stick. */
+#define STICK_TIMEOUT   0x0FFFU
 #define STICK_LIVE_MAX  (STICK_TIMEOUT - 16U)
 
 /* Port 201h, Paku joyStick1Axis (CLI, bits stay high).  IBM joystick 1:
