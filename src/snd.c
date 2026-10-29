@@ -21,6 +21,8 @@ static void snd_ppi_out(unsigned char v);
     parm [al];
 
 static unsigned char snd_on = 0xFF;     /* PREFS_SOUND: $FF on, $00 mute */
+static unsigned char ppi_saved;         /* port 61h as found by snd_init */
+static unsigned char ppi_have;          /* ppi_saved is valid */
 static unsigned char voice_next;
 static unsigned char voice_owner[3];    /* 0 = free; else SND_* id */
 static const unsigned char *voice_pat[3];
@@ -104,9 +106,20 @@ static const unsigned char pat_house[] = {
     0, 0, 0, 0
 };
 
+/* Port 61h bits 5-6 pick what reaches the speaker; 11 is the SN76496.
+ * Remember what was there so snd_shutdown() can put it back -- left at
+ * 11, DOS and BIOS beeps through the 8253 stay silent until something
+ * else resets the mux (FIXES.md 1.8). */
 static void snd_gate_on(void)
 {
-    snd_ppi_out((unsigned char)(snd_ppi_in() | 0x60U));
+    unsigned char v;
+
+    v = snd_ppi_in();
+    if (!ppi_have) {
+        ppi_saved = v;
+        ppi_have = 1;
+    }
+    snd_ppi_out((unsigned char)(v | 0x60U));
 }
 
 static void snd_tone(unsigned char ch, unsigned n, unsigned char att)
@@ -273,6 +286,19 @@ void snd_init(void)
     snd_gate_on();
     voice_next = 0;
     snd_silence();
+}
+
+/* Program exit: silence the chip and restore the port 61h mux bits that
+ * snd_init() found.  Not for sortie boundaries -- snd_silence() is the
+ * mid-game call, and the gate is only ever set once per run. */
+void snd_shutdown(void)
+{
+    snd_silence();
+    if (ppi_have) {
+        snd_ppi_out((unsigned char)((snd_ppi_in() & 0x9FU)
+                                    | (ppi_saved & 0x60U)));
+        ppi_have = 0;
+    }
 }
 
 void snd_tick(void)
