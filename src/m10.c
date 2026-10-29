@@ -6426,8 +6426,16 @@ static void capture_stick_rest(int verbose)
     if (n0 != 0U) {
         stick_cx0 = (unsigned)(calib_sx0 / n0);
         stick_cy0 = (unsigned)(calib_sy0 / n0);
+        calib_n = 8U;
+    } else {
+        /* No live sample: leave calib_n at 0 (and the sums zeroed above)
+         * so read_controls()'s in-flight rest capture takes the first
+         * eight live samples instead.  Setting 8 here regardless left a
+         * stick plugged in after SPACE with centre 0, which
+         * apple_span_from_raw() maps to "always centred" -- axes dead for
+         * the whole run (FIXES.md 1.3). */
+        calib_n = 0;
     }
-    calib_n = 8U;
     if (verbose)
         printf("  rest stick 1 %u,%u (%u)\n", stick_cx0, stick_cy0, n0);
 }
