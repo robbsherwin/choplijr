@@ -352,16 +352,24 @@ static unsigned long    ws_z_restore, ws_z_blit, ws_z_video;
 /* Scenery + chopper + hostages + tanks/jets/shots/explosions. */
 #define DIRTY_MAX       96
 
+/* One byte per field: xbyte < 80, y < 200, wbytes <= 80, rows <= 200 all
+ * fit.  Was four unsigned (8 bytes); the two page lists and two scenery
+ * lists were 3,080 bytes of a 64 KB DGROUP that had 528 bytes to spare
+ * (FIXES.md 2.4).  Widen at the point of use. */
 typedef struct {
-    unsigned xbyte;
-    unsigned y;
-    unsigned wbytes;
-    unsigned rows;
+    unsigned char xbyte;
+    unsigned char y;
+    unsigned char wbytes;
+    unsigned char rows;
 } dirty_rect;
 
+/* n live rects, cap slots, storage elsewhere -- so a list that only ever
+ * holds a handful of rects (the flame footprints) need not carry DIRTY_MAX
+ * slots of DGROUP. */
 typedef struct {
-    unsigned n;
-    dirty_rect r[DIRTY_MAX];
+    unsigned    n;
+    unsigned    cap;
+    dirty_rect *r;
 } dirty_list;
 
 static unsigned orig_mode;
@@ -431,11 +439,17 @@ static unsigned char    hostages_in_houses[N_HOUSES];
 static unsigned char    scenery_full[2];
 static unsigned char    last_flag_bit[2];
 static unsigned char    last_fire_bit[2];
-/* Tentative redeclarations: next_sortie() (below) needs to reset these the
- * same way run_viewer()'s setup does, but the real definitions sit next to
- * the rest of run_viewer()'s per-page state, later in this file. */
-static dirty_list        lists[2];
-static dirty_list        scenery_mark[2];
+/* Sprite dirty lists, plus last full scenery footprints (scroll restore).
+ * Defined here rather than next to run_viewer() because next_sortie()
+ * resets them too and an initialised definition cannot be tentative. */
+static dirty_rect        lists_r[2][DIRTY_MAX];
+static dirty_rect        scenery_r[2][DIRTY_MAX];
+static dirty_list        lists[2] = {
+    { 0, DIRTY_MAX, lists_r[0] }, { 0, DIRTY_MAX, lists_r[1] }
+};
+static dirty_list        scenery_mark[2] = {
+    { 0, DIRTY_MAX, scenery_r[0] }, { 0, DIRTY_MAX, scenery_r[1] }
+};
 static unsigned char    chop_loaded;
 static unsigned char    curr_level;
 static unsigned char    curr_shots;
@@ -1725,8 +1739,8 @@ static void draw_stars_and_moon(unsigned seg, unsigned pg,
      * to erase and nothing to record (next_sortie/game-start reset
      * star_last_sx to STAR_NONE right after this runs anyway). */
     star_shift = (unsigned)((scroll_x >> STAR_PARALLAX_SHIFT) % M8_WIDTH_PX);
-    er.wbytes = 1U;
-    er.rows   = 1U;
+    er.wbytes = 1;
+    er.rows   = 1;
     for (i = 0; i < N_STARS; i++) {
         sx = (star_x[i] + M8_WIDTH_PX * 4U - star_shift) % M8_WIDTH_PX;
         if (i & 1U) {
@@ -1751,8 +1765,8 @@ static void draw_stars_and_moon(unsigned seg, unsigned pg,
              * a colour-cycle transition, not a move, so this is the only
              * case that needs restore_rect at the *old* spot. */
             if (old_sx != (unsigned char)STAR_NONE) {
-                er.xbyte = (unsigned)old_sx / 2U;
-                er.y     = (unsigned)star_y[i];
+                er.xbyte = (unsigned char)(old_sx / 2U);
+                er.y     = star_y[i];
                 restore_rect(seg, &er);
                 star_last_sx[pg][i] = (unsigned char)STAR_NONE;
             }
@@ -1765,8 +1779,8 @@ static void draw_stars_and_moon(unsigned seg, unsigned pg,
              * visit: the old column is now stale and nothing else will
              * ever revisit it, so erase it here before drawing the new
              * one. At STAR_PARALLAX_SHIFT's drift rate this is rare. */
-            er.xbyte = (unsigned)old_sx / 2U;
-            er.y     = (unsigned)star_y[i];
+            er.xbyte = (unsigned char)(old_sx / 2U);
+            er.y     = star_y[i];
             restore_rect(seg, &er);
         }
         plot_px(seg, sx, (unsigned)star_y[i], c);
@@ -2013,17 +2027,17 @@ static void dirty_add(dirty_list *list, unsigned xbyte, unsigned y,
     dirty_rect *d;
     unsigned    rw, xb;
 
-    if (list == 0 || list->n >= DIRTY_MAX || wbytes == 0U || rows == 0U)
+    if (list == 0 || list->n >= list->cap || wbytes == 0U || rows == 0U)
         return;
     rw = (wbytes + 1U) & ~1U;
     xb = xbyte;
     if ((unsigned)(xb + rw) > M8_BYTES_PER_ROW)
         xb = (unsigned)(M8_BYTES_PER_ROW - rw);
     d = &list->r[list->n];
-    d->xbyte  = xb;
-    d->y      = y;
-    d->wbytes = rw;
-    d->rows   = rows;
+    d->xbyte  = (unsigned char)xb;
+    d->y      = (unsigned char)y;
+    d->wbytes = (unsigned char)rw;
+    d->rows   = (unsigned char)rows;
     list->n++;
 }
 
@@ -5730,10 +5744,6 @@ static void draw_hostages(unsigned seg, dirty_list *list)
         blit_at(seg, sx, sy, ee, oo, list);
     }
 }
-
-/* Sprite dirty lists, plus last full scenery footprints (scroll restore). */
-static dirty_list lists[2];
-static dirty_list scenery_mark[2];
 
 /* Achieved rate, so the sim Hz reported after a sortie is measured rather
  * than assumed.  BIOS tick at 0040:006C runs at 18.2065 Hz. */
