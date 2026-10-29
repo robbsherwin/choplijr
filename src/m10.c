@@ -80,6 +80,8 @@ extern unsigned char  base_flag_00_e[];
 extern unsigned char  base_flag_00_o[];
 extern unsigned char  base_flag_01_e[];
 extern unsigned char  base_flag_01_o[];
+extern unsigned char  moon_e[];
+extern unsigned char  moon_o[];
 
 extern unsigned char *hostage_run_e[4];
 extern unsigned char *hostage_run_o[4];
@@ -124,6 +126,10 @@ extern unsigned char  title_the_end[];
 extern unsigned char  title_crown[];
 extern unsigned char *sortie_banner_e[3];
 
+static unsigned opt_debug       = 0;        /* /debug=N; N reserved, only
+                                              * 1 defined so far (near-end-
+                                              * game / max-difficulty rig,
+                                              * see apply_debug_state) */
 static int      opt_bios_flip   = 0;
 static int      opt_wait        = 1;
 static int      opt_force       = 0;
@@ -1648,31 +1654,29 @@ static void scenery_invalidate(void)
  * did at shift 5, on top of running over 8 stars instead of 36. */
 #define STAR_PARALLAX_SHIFT 7U
 static const unsigned char star_x[N_STARS] = {
-    12, 38, 65, 91, 118, 143, 24, 104
+    22, 38, 75, 91, 118, 143, 24, 104
 };
 static const unsigned char star_y[N_STARS] = {
-    14, 22, 12, 94, 18, 108, 72, 86
+    34, 22, 32, 94, 18, 108, 72, 86
 };
+
+static void blit_at(unsigned seg, int x_px, int y,
+                    unsigned char *even, unsigned char *odd,
+                    dirty_list *list);
+
+/* moon_e/moon_o (src/sprdata_moon.c): a hand-converted 10x16 photo
+ * (lib/png/moon.png, docs/M10.md) in place of the flat 2-tone procedural
+ * circle this used to be -- same RLE blit every other piece of scenery
+ * uses, so this costs a blit_at call instead of ~60 plot_px calls, not
+ * more: the moon is still only ever redrawn when draw_stars_and_moon's
+ * hit-test below says something disturbed it, exactly as before. Centred
+ * on the same (126, 20) point the procedural circle was. */
+#define MOON_X0 121
+#define MOON_Y0 12
 
 static void draw_moon(unsigned seg)
 {
-    int dx, dy, r2;
-    unsigned char c;
-
-    for (dy = -4; dy <= 4; dy++) {
-        for (dx = -4; dx <= 4; dx++) {
-            r2 = dx * dx + dy * dy;
-            if (r2 > 18)
-                continue;
-            if (dx <= -2)
-                c = 7;
-            else if (r2 > 12 && dx < 0)
-                c = 7;
-            else
-                c = 15;
-            plot_px(seg, (unsigned)(126 + dx), (unsigned)(20 + dy), c);
-        }
-    }
+    blit_at(seg, MOON_X0, MOON_Y0, moon_e, moon_o, 0);
 }
 
 static const unsigned char star_cycle[4] = { 15, 8, 0, 14 };
@@ -1716,7 +1720,8 @@ static void draw_stars_and_moon(unsigned seg, unsigned pg,
             dirty_bbox_calc(&bb, hit, nhit);
             bbp = &bb;
         }
-        if (dirty_hits_box(hit, nhit, bbp, 122U, 16U, 131U, 25U))
+        if (dirty_hits_box(hit, nhit, bbp, MOON_X0, MOON_Y0,
+                           MOON_X0 + 10U, MOON_Y0 + 16U))
             draw_moon(seg);
     }
 
@@ -4801,6 +4806,54 @@ static void spawn_one_in_field(int house)
                    (((unsigned)house + (FARHOUSE_X >> 8)) << 8);
 }
 
+/* /debug=1: rig a near-endgame, max-difficulty start for testing jet/alien
+ * behaviour and the 64th-rescue win check, without having to actually play
+ * two and a half sorties to get there. Runs once, right after run_viewer's
+ * normal init_hostages() call, so it only has to override what that leaves
+ * in the "wrong" state for this scenario -- everything else (chopper
+ * position, sortie banner, entity list, dirty tracking) is already correct
+ * because it is the same setup a real third sortie would reach.
+ *
+ * Scenario: 62 rescued + 1 killed + 1 hostage still live in the field =
+ * 64 accounted for, so delivering that one field hostage is a real test of
+ * the win path (sim_tick's total_rescues==64 check, choplifter.s:599-608).
+ * curr_level is capped at 3 in the original design (DESIGN.md section 8 --
+ * level 2 is already "adds saucers", the last tier), so 3 is the highest
+ * this can be set to; there is no separate "how many drop-offs" counter
+ * past that cap to set to 5. */
+static void apply_debug_state(void)
+{
+    int i;
+
+    sortie = MAX_SORTIE - 1;            /* third sortie: one more death ends
+                                          * the game (sim_tick's loss check) */
+    total_rescues = 62;
+    hostages_killed = 1;
+    hostages_loaded = 0;
+    chop_loaded = 0;
+    curr_level = 3;                     /* max: tanks + jets + saucers all
+                                          * active (DESIGN.md section 8) */
+
+    for (i = 0; i < MAX_HOSTAGES; i++)
+        hostage_anim[i] = HST_FREE;     /* clear init_hostages()'s normal
+                                          * 8-hostage opening spawn */
+    hostages_active = 0;
+    hostages_left = 0;
+    for (i = 0; i < (int)N_HOUSES; i++) {
+        house_states[i] = 1;            /* all four barracks open/emptied */
+        hostages_in_houses[i] = 0;
+    }
+    /* Every slot was just freed above, and hostage_alloc() (used inside
+     * spawn_one_in_field) scans from MAX_HOSTAGES-1 down for the first
+     * free one -- with nothing else touching hostage_anim in between,
+     * this one call deterministically lands in slot MAX_HOSTAGES-1, so
+     * hostage_act can be forced afterward without spawn_one_in_field
+     * needing to hand its index back. */
+    spawn_one_in_field(0);               /* the 64th hostage, at the far
+                                           * (house 0) barracks */
+    hostage_act[MAX_HOSTAGES - 1] = 0xFF; /* running toward house 0 */
+}
+
 static void spawn_unload(void)
 {
     int i;
@@ -5896,6 +5949,8 @@ static void run_viewer(void)
     scroll_x = SCROLL_START;
     init_helicopter();
     init_hostages();
+    if (opt_debug == 1U)
+        apply_debug_state();
     banner_left = BANNER_TICKS;
     hud_prev_tog = 0;
     dbg_prev_p = 1;             /* ignore P held through SPACE */
@@ -6164,6 +6219,7 @@ static void usage(void)
 "  /frames=N    retraces then exit. 0 (default, attended) means until Esc.\n"
 "               /batch with no /frames uses 1800 retraces.\n"
 "  /pa=N /pb=N  force two page numbers in 1-7\n"
+"  /debug=1     rig a near-endgame max-difficulty test start (m10.c)\n"
 "  /force       run even if the BIOS model byte is not a PCjr's\n"
 "  /ztimer      Zen-timer one present at sim_frame 4 (pad, dirty list live)\n"
 "  /ztimer=N    same, at sim_frame N.  Interrupts off; do not touch keys.\n"
@@ -6229,7 +6285,9 @@ static int parse_args(int argc, char **argv)
         else if (strncmp(a, "frames=", 7) == 0) {
             opt_frames = (unsigned)atoi(a + 7);
             saw_frames = 1;
-        } else if (strncmp(a, "pa=", 3) == 0)
+        } else if (strncmp(a, "debug=", 6) == 0)
+            opt_debug = (unsigned)atoi(a + 6);
+        else if (strncmp(a, "pa=", 3) == 0)
             opt_page_a = atoi(a + 3);
         else if (strncmp(a, "pb=", 3) == 0)
             opt_page_b = atoi(a + 3);
