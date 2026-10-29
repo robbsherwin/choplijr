@@ -287,13 +287,6 @@ void          __cdecl poke_word(unsigned seg, unsigned off, unsigned val);
  * bits 0,1 X/Y.  *buttons = (~port>>4)&3 (port bits 4-5, 1 = pressed). */
 unsigned __cdecl stick_read_port(unsigned *x, unsigned *y, unsigned *buttons);
 
-/* Stick A (bits 0,1) then stick B (bits 2,3).  *buttons = (~port>>4)&15
- * (A buttons in bits 0-1, B in 2-3, 1 = pressed).  Returns 1 if either
- * stick has an axis inside (0, STICK_TIMEOUT). */
-unsigned __cdecl stick_read_both(unsigned *x0, unsigned *y0,
-                                 unsigned *x1, unsigned *y1,
-                                 unsigned *buttons);
-
 /* INT 15h AH=84h DX=1 for stick A; buttons still from port 201h.  Returns 1
  * if the BIOS call succeeded (CF clear).  Override only -- PCjr BIOS does
  * not implement AH=84h. */

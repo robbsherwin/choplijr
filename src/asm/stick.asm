@@ -12,8 +12,9 @@
 ; count while the axis bits stay high, timeout CX=STICK_TIMEOUT (Paku used
 ; $7FFF; see pcjr.h for why it is 0x0FFF here).  Trixter's 1.6a
 ; note: CLI stops twitchy counts on a PCjr.  M5 uses joystick 1 only
-; (Paku joyStick1Axis, bits 0,1; IBM first connector).  Stick B (bits 2,3)
-; is implemented in stick_read_both but M5 does not call it.  INT 15h
+; (Paku joyStick1Axis, bits 0,1; IBM first connector).  A stick B reader
+; (bits 2,3, Paku joyStick2Axis) used to live here as stick_read_both;
+; nothing ever called it and it was removed (FIXES.md 3.1).  INT 15h
 ; AH=84h is an override only -- original PCjr BIOS does not implement it.
 ; Buttons: port 201h active low; stick 1 is bits 4-5 (Paku nibble bits 0-1).
 ;
@@ -64,120 +65,6 @@ kbd_pulse:
         times   128 db 0
 kbd_broke:
         times   128 db 0
-
-;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
-; unsigned __cdecl stick_read_both(
-;     unsigned *x0, unsigned *y0, unsigned *x1, unsigned *y1,
-;     unsigned *buttons)
-;
-; Paku Paku 1.6a joyStick1Axis then joyStick2Axis, verbatim counting:
-;   xor ax/bx/di, CX=STICK_TIMEOUT, CLI, OUT 201h, then
-;     SHR AL,1 / ADC BX,0 / ADD DI,AX / IN AL,DX / AND mask / LOOPNZ
-; Stick A mask $03 (bits 0,1).  Stick B AND $0F then two SHRs (bits 2,3).
-; Buttons: (~port >> 4) & 15, so bits 0-1 stick A, 2-3 stick B, 1 = pressed.
-; AX = 1 if either stick has an axis inside (0, timeout).
-;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
-        global  _stick_read_both
-_stick_read_both:
-        push    bp
-        mov     bp,sp
-        push    di
-        push    si
-        push    ds
-        push    es
-
-        xor     ax,ax
-        xor     bx,bx
-        mov     cx,STICK_TIMEOUT
-        xor     di,di
-        mov     dx,GAMEPORT
-        cli
-        out     dx,al
-.a_loop:
-        shr     al,1
-        adc     bx,0
-        add     di,ax
-        in      al,dx
-        and     al,0x03
-        loopnz  .a_loop
-        sti
-
-        mov     si,[bp+4]
-        mov     [si],bx
-        mov     si,[bp+6]
-        mov     [si],di
-
-        xor     ax,ax
-        xor     bx,bx
-        mov     cx,STICK_TIMEOUT
-        xor     di,di
-        mov     dx,GAMEPORT
-        cli
-        out     dx,al
-.b_loop:
-        shr     al,1
-        adc     bx,0
-        add     di,ax
-        in      al,dx
-        and     al,0x0F
-        shr     al,1
-        shr     al,1
-        loopnz  .b_loop
-        sti
-
-        mov     si,[bp+8]
-        mov     [si],bx
-        mov     si,[bp+10]
-        mov     [si],di
-
-        in      al,dx
-        not     al
-        mov     cl,4
-        shr     al,cl
-        and     ax,0x000F
-        mov     si,[bp+12]
-        mov     [si],ax
-
-        mov     ax,1
-        mov     si,[bp+4]
-        mov     bx,[si]
-        mov     si,[bp+6]
-        mov     cx,[si]
-        call    .pair_live
-        jc      .both_done
-        mov     si,[bp+8]
-        mov     bx,[si]
-        mov     si,[bp+10]
-        mov     cx,[si]
-        call    .pair_live
-        jc      .both_done
-        xor     ax,ax
-.both_done:
-        pop     es
-        pop     ds
-        pop     si
-        pop     di
-        pop     bp
-        ret
-
-; BX=x CX=y.  CF=1 if an axis is inside (0, STICK_TIMEOUT).
-.pair_live:
-        cmp     bx,0
-        je      .x_edge
-        cmp     bx,STICK_LIVE_MAX
-        jae     .x_edge
-        stc
-        ret
-.x_edge:
-        cmp     cx,0
-        je      .pair_dead
-        cmp     cx,STICK_LIVE_MAX
-        jae     .pair_dead
-        stc
-        ret
-.pair_dead:
-        clc
-        ret
 
 ;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
 ; unsigned __cdecl stick_read_port(unsigned *x, unsigned *y, unsigned *buttons)

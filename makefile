@@ -96,7 +96,11 @@ M10     = $(BUILD)\m10.exe
 #        cap) -- re-check the .map file's DGROUP size after touching this.
 # -w4    warnings on.  Worth reading: this code cannot be run on the machine
 #        it was written on, so the compiler is the only reviewer available.
-CFLAGS  = -0 -ms -ot -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND)
+# -dDEBUG_KEYS  keep the in-play debug keys (P = teleport to the first
+#        barracks).  Remove it for a release build; the F1/` debug HUD and
+#        the /force* switches stay either way, they are harmless to a
+#        player who does not ask for them.
+CFLAGS  = -0 -ms -ot -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND) -dDEBUG_KEYS
 
 # -f obj is the OMF object format wlink reads directly (DESIGN.md section 12).
 # Listings are kept because the assembly here has to be verified by reading,
