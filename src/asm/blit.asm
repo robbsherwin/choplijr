@@ -137,288 +137,224 @@ _blit_mask_m8:
 ;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
 ; unsigned __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
 ;                              unsigned sseg, unsigned soff)
+; unsigned __cdecl blit_rle_m8_rows(unsigned dseg, unsigned xbyte, unsigned y,
+;                                   unsigned sseg, unsigned soff,
+;                                   unsigned rows)
+; unsigned __cdecl blit_rle_m8_fire(...)       same arguments as blit_rle_m8
+; unsigned __cdecl blit_rle_m8_fire_rows(...)  same arguments as _rows
 ;
-; soff -> { width_px, height_px, RLE rows }.  Each row is
+; blit_rle_m8: soff -> { width_px, height_px, RLE rows }; draws height_px
+; rows.  blit_rle_m8_rows: soff already points at the first RLE row to draw
+; and `rows` says how many, so a caller that has walked the stream past the
+; rows above the HUD band, or clamped the count at the bottom of the screen,
+; draws just the visible part (FIXES.md 1.5 / 1.6).  Each row is
 ;
 ;   { skip_bytes, run_bytes, data[run_bytes] }*  0x00, 0x00
 ;
 ; skip_bytes advances ES:DI (transparent).  run_bytes >= 2 is a fully opaque
 ; run (REP MOVSB).  run_bytes == 1 is one byte: both nibbles live is a store,
 ; a mixed nibble is a dest RMW, 00h is a skip.  0x00 0x00 ends the row;
-; trailing transparency is implicit.
+; trailing transparency is implicit.  The skip/run pair is read as one word
+; (AL = skip, AH = run); the terminator is the word 0.
+;
+; The _fire variants pass every stored byte through fire_tab (CS XLATB)
+; first: m10.c's yellow-to-fire recolour (fire_byte/fire_nibble with
+; blit_fire == 1, the only value it is called with).  The remap never
+; changes which nibbles are transparent, so the row structure is identical;
+; an opaque run just cannot be REP MOVSB.
 ;
 ; Returns the total run_bytes (opaque + mixed) copied -- what m10.c used to
-; get by having blit_at call rle_run_bytes() to re-walk this same stream a
-; second time in C, purely for the WORKSET/ZTIMER byte counts (measured at
-; ~19% of one present's cost; see CLAUDE-THOUGHTS.md).  Every general
-; register here is already committed (ES/DS/SI/DI/BX/DX/AX/CX), so the
-; running total lives in a local stack slot at [bp-2] instead, shared with
-; .row across calls since .row is a plain near CALL, not its own frame.
+; get by re-walking the stream in C for the WORKSET/ZTIMER counts (~19% of a
+; present, CLAUDE-THOUGHTS.md).  Every register is committed, so the total
+; lives in [bp-2].
 ;
-; Caller guarantees: the sprite's byte span fits the 160-pixel width,
-; y+height fits 200, height != 0.
+; Row walk: rows come in pairs, even scanline in the first 8 KB bank and odd
+; in the second, with the pair base advanced by 80 after each odd row.  The
+; row body (RLE_ROW) is expanded twice, once per bank, so there is no CALL /
+; RET per row and no register save around it -- the old .row pushed and
+; popped a DX it never touched (FIXES.md 2.2).  The plain walk keeps the pair
+; base in BX; the fire walk needs BX for XLATB and keeps the base in [bp-4].
+;
+; Caller guarantees: the sprite's byte span fits the 160-pixel width and
+; every row drawn is in 0..199.  The _rows entries are how m10.c meets the
+; second part; the header entries stay for m3-m9.
 ;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+
+; Frame and address setup shared by the four entries.  On exit: ES = dseg,
+; BX = pair base (also [bp-4] when %1 is nonzero), DI = y (parity only),
+; DS:SI = soff, [bp-2] = 0.  AX is free.
+%macro RLE_PROLOGUE 1
+        push    bp
+        mov     bp,sp
+        sub     sp,4                    ; [bp-2] byte total, [bp-4] pair base
+        push    di
+        push    si
+        push    ds
+        push    es
+        cld
+
+        mov     word [bp-2],0
+
+        mov     es,[bp+4]               ; dseg
+        mov     ax,[bp+8]               ; y
+        mov     di,ax                   ; parity tested below
+        mov     bx,ax
+        and     bx,0xFFFE               ; (y >> 1) * 2: word index
+        mov     ax,[cs:rowpair_tab+bx]  ; (y >> 1) * 80
+        add     ax,[bp+6]               ; + xbyte
+        mov     bx,ax                   ; pair base
+%if %1
+        mov     [bp-4],ax               ; fire walk keeps it here, BX = table
+%endif
+
+        mov     si,[bp+12]              ; soff
+        mov     ds,[bp+10]              ; sseg -- last
+%endmacro
+
+%macro RLE_EPILOGUE 0
+        mov     ax,[bp-2]               ; return value: total bytes copied
+        pop     es
+        pop     ds
+        pop     si
+        pop     di
+        add     sp,4
+        pop     bp
+        ret
+%endmacro
+
+; One RLE row.  DS:SI command stream, ES:DI dest row start, [bp-2] running
+; total.  Uses AX and CX; %1 nonzero selects the fire remap (BX = fire_tab).
+%macro RLE_ROW 1
+%%next_cmd:
+        lodsw                           ; AL = skip, AH = run
+        test    ax,ax
+        jz      %%row_done              ; skip == 0 && run == 0
+        mov     cl,ah
+        xor     ch,ch                   ; CX = run
+        xor     ah,ah
+        add     di,ax                   ; transparent dest bytes
+        jcxz    %%next_cmd
+        add     [bp-2],cx               ; count run bytes, opaque or mixed
+        cmp     cx,1
+        je      %%one
+%if %1
+%%run:
+        lodsb
+        cs      xlatb
+        stosb
+        loop    %%run                   ; opaque run, remapped byte by byte
+%else
+        rep     movsb                   ; opaque run, both nibbles live
+%endif
+        jmp     short %%next_cmd
+%%one:
+        lodsb
+%if %1
+        cs      xlatb
+%endif
+        test    al,al
+        jz      %%trans
+        mov     ah,al
+        and     ah,0x0f
+        jz      %%hi_only
+        mov     ah,al
+        and     ah,0xf0
+        jz      %%lo_only
+        stosb
+        jmp     short %%next_cmd
+%%hi_only:
+        mov     ah,[es:di]
+        and     ah,0x0f
+        and     al,0xf0
+        or      al,ah
+        stosb
+        jmp     short %%next_cmd
+%%lo_only:
+        mov     ah,[es:di]
+        and     ah,0xf0
+        and     al,0x0f
+        or      al,ah
+        stosb
+        jmp     short %%next_cmd
+%%trans:
+        inc     di
+        jmp     short %%next_cmd
+%%row_done:
+%endmacro
+
+        global  _blit_rle_m8_rows
+_blit_rle_m8_rows:
+        RLE_PROLOGUE 0
+        mov     dx,[bp+14]              ; rows
+        jmp     short rle_walk_plain
+
         global  _blit_rle_m8
 _blit_rle_m8:
-        push    bp
-        mov     bp,sp
-        sub     sp,2                    ; local: running byte total, [bp-2]
-        push    di
-        push    si
-        push    ds
-        push    es
-        cld
-
-        mov     word [bp-2],0
-
-        mov     es,[bp+4]               ; dseg
-        mov     ax,[bp+8]               ; y
-        mov     di,ax                   ; parity tested below
-        mov     bx,ax
-        and     bx,0xFFFE               ; (y >> 1) * 2: word index
-        mov     ax,[cs:rowpair_tab+bx]  ; (y >> 1) * 80
-        add     ax,[bp+6]               ; + xbyte
-        mov     bx,ax                   ; pair base
-
-        mov     si,[bp+12]              ; soff
-        mov     ds,[bp+10]              ; sseg -- last
-
+        RLE_PROLOGUE 0
         lodsb                           ; width_px
         lodsb                           ; height_px
         xor     ah,ah
         mov     dx,ax                   ; rows
+        ; falls into rle_walk_plain
+
+; DX rows, BX pair base, DI = y on entry.
+rle_walk_plain:
         or      dx,dx
         jz      .done
-
         test    di,1
-        jnz     .start_odd
-        jmp     short .even_row
-.start_odd:
-        jmp     short .odd_row
-
+        jnz     .odd_row
 .even_row:
         mov     di,bx
-        call    .row
+        RLE_ROW 0
         dec     dx
         jz      .done
 .odd_row:
         lea     di,[bx+M8_BANK_STRIDE]
-        call    .row
+        RLE_ROW 0
         add     bx,M8_ROW_BYTES
         dec     dx
-        jnz     .even_row
-
+        jz      .done
+        jmp     .even_row
 .done:
-        mov     ax,[bp-2]               ; return value: total bytes copied
-        pop     es
-        pop     ds
-        pop     si
-        pop     di
-        add     sp,2
-        pop     bp
-        ret
+        RLE_EPILOGUE
 
-; One RLE row: DS:SI command stream, ES:DI dest.  BX pair base, DX rows left.
-; [bp-2] (outer frame, still valid: .row is a plain near CALL) accumulates
-; the running byte total across every row of this blit.
-.row:
-        push    dx
-.next_cmd:
-        lodsb                           ; skip
-        mov     ah,al
-        lodsb                           ; run
-        mov     cl,al
-        or      al,ah
-        jz      .row_done               ; skip==0 && run==0
-        xor     ch,ch
-        mov     al,ah
-        xor     ah,ah
-        add     di,ax                   ; transparent dest bytes
-        jcxz    .next_cmd
-        add     [bp-2],cx               ; count run bytes, opaque or mixed
-        cmp     cx,1
-        je      .one
-        rep     movsb                   ; opaque run, both nibbles live
-        jmp     short .next_cmd
-.one:
-        lodsb
-        test    al,al
-        jz      .trans
-        mov     ah,al
-        and     ah,0x0f
-        jz      .hi_only
-        mov     ah,al
-        and     ah,0xf0
-        jz      .lo_only
-        stosb
-        jmp     short .next_cmd
-.hi_only:
-        mov     ah,[es:di]
-        and     ah,0x0f
-        and     al,0xf0
-        or      al,ah
-        stosb
-        jmp     short .next_cmd
-.lo_only:
-        mov     ah,[es:di]
-        and     ah,0xf0
-        and     al,0x0f
-        or      al,ah
-        stosb
-        jmp     short .next_cmd
-.trans:
-        inc     di
-        jmp     short .next_cmd
-.row_done:
-        pop     dx
-        ret
+        global  _blit_rle_m8_fire_rows
+_blit_rle_m8_fire_rows:
+        RLE_PROLOGUE 1
+        mov     dx,[bp+14]              ; rows
+        jmp     short rle_walk_fire
 
-;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
-; unsigned __cdecl blit_rle_m8_fire(unsigned dseg, unsigned xbyte, unsigned y,
-;                                   unsigned sseg, unsigned soff)
-;
-; Same RLE format and row walk as blit_rle_m8 above.  m10.c's fire remap
-; (fire_byte/fire_nibble, called only with blit_fire == 1) only ever recolours
-; a nibble that is already 0x0E to another nonzero value -- it never makes an
-; opaque nibble transparent or a transparent one opaque -- so the skip /
-; opaque-run / mixed-nibble structure of a row is identical to the plain
-; blitter; only the byte value written differs.  That means an opaque run can
-; still be a single loop instead of a per-byte C call into blit_rle_clip /
-; plot_m8_byte (peek_byte/poke_byte far calls plus a real DIV in fire_nibble's
-; %3, redone from scratch every byte) -- it just can't be REP MOVSB, since
-; each byte needs an XLATB first.  fire_tab below is fixed for blit_fire == 1,
-; the only value m10.c ever calls a fire blit with.
-;
-; Returns the total run_bytes (opaque + mixed) copied, same [bp-2] local-slot
-; technique as blit_rle_m8 -- see that routine's comment.
-;
-; Caller guarantees: the sprite's byte span fits the 160-pixel width,
-; y+height fits 200, height != 0.  Same as blit_rle_m8; not a clipped
-; blitter -- callers still fall back to blit_rle_clip near a screen edge.
-;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
         global  _blit_rle_m8_fire
 _blit_rle_m8_fire:
-        push    bp
-        mov     bp,sp
-        sub     sp,2                    ; local: running byte total, [bp-2]
-        push    di
-        push    si
-        push    ds
-        push    es
-        cld
-
-        mov     word [bp-2],0
-
-        mov     es,[bp+4]               ; dseg
-        mov     ax,[bp+8]               ; y
-        mov     di,ax                   ; parity tested below
-        mov     bx,ax
-        and     bx,0xFFFE               ; (y >> 1) * 2: word index
-        mov     ax,[cs:rowpair_tab+bx]  ; (y >> 1) * 80
-        add     ax,[bp+6]               ; + xbyte
-        mov     bx,ax                   ; pair base
-
-        mov     si,[bp+12]              ; soff
-        mov     ds,[bp+10]              ; sseg -- last
-
+        RLE_PROLOGUE 1
         lodsb                           ; width_px
         lodsb                           ; height_px
         xor     ah,ah
         mov     dx,ax                   ; rows
+        ; falls into rle_walk_fire
+
+; DX rows, [bp-4] pair base, DI = y on entry; BX = fire_tab throughout.
+rle_walk_fire:
         or      dx,dx
         jz      .done
-
         test    di,1
-        jnz     .start_odd
-        jmp     short .even_row
-.start_odd:
-        jmp     short .odd_row
-
+        mov     bx,fire_tab             ; MOV leaves the flags alone
+        jnz     .odd_row
 .even_row:
-        mov     di,bx
-        call    .row
+        mov     di,[bp-4]
+        RLE_ROW 1
         dec     dx
         jz      .done
 .odd_row:
-        lea     di,[bx+M8_BANK_STRIDE]
-        call    .row
-        add     bx,M8_ROW_BYTES
+        mov     di,[bp-4]
+        add     di,M8_BANK_STRIDE
+        RLE_ROW 1
+        add     word [bp-4],M8_ROW_BYTES
         dec     dx
-        jnz     .even_row
-
+        jz      .done
+        jmp     .even_row
 .done:
-        mov     ax,[bp-2]               ; return value: total bytes copied
-        pop     es
-        pop     ds
-        pop     si
-        pop     di
-        add     sp,2
-        pop     bp
-        ret
-
-; One RLE row, fire-remapped.  DS:SI command stream, ES:DI dest.  BX is the
-; outer loop's pair base on entry -- saved and restored around this row's use
-; of BX as the fire_tab base for CS XLATB.  [bp-2] (outer frame) accumulates
-; the running byte total across every row of this blit.
-.row:
-        push    dx
-        push    bx
-        mov     bx,fire_tab
-.next_cmd:
-        lodsb                           ; skip
-        mov     ah,al
-        lodsb                           ; run
-        mov     cl,al
-        or      al,ah
-        jz      .row_done               ; skip==0 && run==0
-        xor     ch,ch
-        mov     al,ah
-        xor     ah,ah
-        add     di,ax                   ; transparent dest bytes
-        jcxz    .next_cmd
-        add     [bp-2],cx               ; count run bytes, opaque or mixed
-        cmp     cx,1
-        je      .one
-.run:
-        lodsb
-        cs      xlatb
-        stosb
-        loop    .run                    ; opaque run, remapped byte by byte
-        jmp     short .next_cmd
-.one:
-        lodsb
-        cs      xlatb
-        test    al,al
-        jz      .trans
-        mov     ah,al
-        and     ah,0x0f
-        jz      .hi_only
-        mov     ah,al
-        and     ah,0xf0
-        jz      .lo_only
-        stosb
-        jmp     short .next_cmd
-.hi_only:
-        mov     ah,[es:di]
-        and     ah,0x0f
-        and     al,0xf0
-        or      al,ah
-        stosb
-        jmp     short .next_cmd
-.lo_only:
-        mov     ah,[es:di]
-        and     ah,0xf0
-        and     al,0x0f
-        or      al,ah
-        stosb
-        jmp     short .next_cmd
-.trans:
-        inc     di
-        jmp     short .next_cmd
-.row_done:
-        pop     bx
-        pop     dx
-        ret
+        RLE_EPILOGUE
 
 ; fire_byte(src) for m10.c's fire_nibble/fire_byte with blit_fire fixed at 1
 ; (the only value it is ever called with): a 0x0E nibble becomes 4, 0Ch or

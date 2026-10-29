@@ -1821,14 +1821,35 @@ static void draw_stars_and_moon(unsigned seg, unsigned pg,
     }
 }
 
-static unsigned rle_run_bytes(unsigned char *s, unsigned rows)
+/* Walk n RLE rows starting at p (a row start, not the sprite header) and
+ * return the start of the row after them.  blit_at uses it to step past
+ * the rows of a sprite that sit above the HUD band, so the blitters only
+ * ever see rows 8..199 (FIXES.md 1.5). */
+static const unsigned char *rle_skip_rows(const unsigned char *p, unsigned n)
 {
-    const unsigned char *p;
-    unsigned              r, n, skip, run;
+    unsigned skip, run;
 
-    if (s == 0 || rows == 0U)
+    while (n != 0U) {
+        skip = *p++;
+        run  = *p++;
+        if (skip == 0U && run == 0U) {
+            n--;
+            continue;
+        }
+        p += run;
+    }
+    return p;
+}
+
+/* Opaque + mixed bytes in `rows` RLE rows starting at p (a row start, not
+ * the sprite header).  Only the clipped fallback still needs this; the
+ * fast blitters return the same count as a side effect of the blit. */
+static unsigned rle_run_bytes(const unsigned char *p, unsigned rows)
+{
+    unsigned r, n, skip, run;
+
+    if (p == 0 || rows == 0U)
         return 0U;
-    p = s + 2;
     n = 0U;
     for (r = 0; r < rows; r++) {
         for (;;) {
@@ -2223,14 +2244,13 @@ static const unsigned char *blit_rle_row_clip(unsigned seg, unsigned y,
     }
 }
 
-static void blit_rle_clip(unsigned seg, int x_px, int y, unsigned char *s,
-                          unsigned rows)
+/* p -> first RLE row to draw (header consumed, HUD rows skipped). */
+static void blit_rle_clip(unsigned seg, int x_px, int y,
+                          const unsigned char *p, unsigned rows)
 {
-    const unsigned char *p;
     unsigned              r;
     int                   dest_b;
 
-    p = s + 2;
     dest_b = xbyte_from_px(x_px);
     for (r = 0; r < rows; r++)
         p = blit_rle_row_clip(seg, (unsigned)(y + (int)r), dest_b, p);
@@ -2240,18 +2260,36 @@ static void blit_at(unsigned seg, int x_px, int y,
                     unsigned char *even, unsigned char *odd,
                     dirty_list *list)
 {
-    unsigned char *s;
-    int            wpx, h, x1, vis0, vis1, xb, wb, xbyte0;
+    unsigned char       *s;
+    const unsigned char *p;
+    int            wpx, h, x1, vis0, vis1, xb, wb, xbyte0, skip, rows;
 
-    if (y < (int)HUD_ROWS || y >= (int)M8_HEIGHT_PX)
+    if (y >= (int)M8_HEIGHT_PX)
         return;
     s = (x_px & 1) ? odd : even;
     wpx = (int)s[0];
     h   = (int)s[1];
     if (h <= 0 || wpx <= 0)
         return;
-    if ((unsigned)(y + h) > M8_HEIGHT_PX)
-        h = (int)M8_HEIGHT_PX - y;
+    /* Vertical clip.  Rows above the HUD band are walked past in the RLE
+     * stream rather than drawn; rows below 199 are dropped by the count.
+     * Both blit paths honour `rows`, so a sprite straddling an edge no
+     * longer vanishes whole at the top (a climbing jet popped out five
+     * rows early) or wraps into the other bank at the bottom -- the old
+     * fast path clamped h and then drew the header's full height anyway
+     * (FIXES.md 1.5 / 1.6). */
+    if (y + h <= (int)HUD_ROWS)
+        return;
+    skip = 0;
+    if (y < (int)HUD_ROWS) {
+        skip = (int)HUD_ROWS - y;
+        y = (int)HUD_ROWS;
+    }
+    rows = h - skip;
+    if (y + rows > (int)M8_HEIGHT_PX)
+        rows = (int)M8_HEIGHT_PX - y;
+    if (rows <= 0)
+        return;
     x1 = x_px + wpx;
     if (x1 <= 0 || x_px >= (int)M8_WIDTH_PX)
         return;
@@ -2263,6 +2301,10 @@ static void blit_at(unsigned seg, int x_px, int y,
     if (wb <= 0)
         return;
 
+    p = s + 2;                          /* first RLE row */
+    if (skip != 0)
+        p = rle_skip_rows(p, (unsigned)skip);
+
     xbyte0 = xbyte_from_px(x_px);
     if (!opt_forceclip && xbyte0 >= 0 &&
         (unsigned)(xbyte0 + wpx / 2) <= M8_BYTES_PER_ROW) {
@@ -2272,21 +2314,22 @@ static void blit_at(unsigned seg, int x_px, int y,
         unsigned n;
 
         if (blit_fire || opt_forcefire)
-            n = blit_rle_m8_fire(seg, (unsigned)xbyte0, (unsigned)y,
-                                 data_seg(), (unsigned)s);
+            n = blit_rle_m8_fire_rows(seg, (unsigned)xbyte0, (unsigned)y,
+                                      data_seg(), (unsigned)p,
+                                      (unsigned)rows);
         else
-            n = blit_rle_m8(seg, (unsigned)xbyte0, (unsigned)y, data_seg(),
-                            (unsigned)s);
+            n = blit_rle_m8_rows(seg, (unsigned)xbyte0, (unsigned)y,
+                                 data_seg(), (unsigned)p, (unsigned)rows);
         if (!opt_noworkset)
             ws_add_blit(n);
     } else {
         /* Rare edge-of-screen path; still needs its own count. */
         if (!opt_noworkset)
-            ws_add_blit(rle_run_bytes(s, (unsigned)h));
-        blit_rle_clip(seg, x_px, y, s, (unsigned)h);
+            ws_add_blit(rle_run_bytes(p, (unsigned)rows));
+        blit_rle_clip(seg, x_px, y, p, (unsigned)rows);
     }
 
-    dirty_add(list, (unsigned)xb, (unsigned)y, (unsigned)wb, (unsigned)h);
+    dirty_add(list, (unsigned)xb, (unsigned)y, (unsigned)wb, (unsigned)rows);
 }
 
 static int world_to_sx(unsigned wx)

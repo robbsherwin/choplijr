@@ -216,6 +216,18 @@ unsigned __cdecl blit_rle_m8(unsigned dseg, unsigned xbyte, unsigned y,
 unsigned __cdecl blit_rle_m8_fire(unsigned dseg, unsigned xbyte, unsigned y,
                                   unsigned sseg, unsigned soff);
 
+/* M10: the same two blitters with soff pointing at the first RLE *row* to
+ * draw (the two-byte header already consumed, and any rows above the HUD
+ * band already walked past by the caller) and an explicit row count, so a
+ * sprite straddling the top or bottom edge can be drawn clipped instead of
+ * dropped whole (top) or wrapped into the other bank (bottom).  Same return
+ * value, same byte-span guarantee on X. */
+unsigned __cdecl blit_rle_m8_rows(unsigned dseg, unsigned xbyte, unsigned y,
+                                  unsigned sseg, unsigned soff, unsigned rows);
+unsigned __cdecl blit_rle_m8_fire_rows(unsigned dseg, unsigned xbyte,
+                                       unsigned y, unsigned sseg,
+                                       unsigned soff, unsigned rows);
+
 /* DGROUP segment.  Small-model near pointers are offsets from this. */
 unsigned __cdecl data_seg(void);
 
