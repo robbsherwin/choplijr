@@ -572,7 +572,7 @@ static void begin_death(void);
 
 static void cleanup(void)
 {
-    snd_silence();
+    snd_shutdown();
     if (kbd_hooked) {
         kbd_unhook();
         kbd_hooked = 0;

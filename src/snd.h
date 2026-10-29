@@ -26,6 +26,7 @@
 
 void snd_init(void);
 void snd_silence(void);
+void snd_shutdown(void);        /* silence + restore port 61h mux; exit only */
 void snd_tick(void);
 void snd_play(unsigned char id);
 void snd_toggle(void);
