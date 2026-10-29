@@ -68,7 +68,7 @@ if not exist build mkdir build
 
 rem -- C: 8086 code generation, small model, DOS target ----------------------
 echo [cc ]  src\m1.c    (ground colour %GROUND%)
-%CC% -0 -ms -os -bt=dos -zq -w4 -i=src -dGROUND_COLOUR=GROUND_%GROUND% -dDEBUG_KEYS ^
+%CC% -0 -ms -os -bt=dos -zq -w4 -i=src -dGROUND_COLOUR=GROUND_%GROUND% ^
   -fo=build\m1.obj src\m1.c
 if errorlevel 1 goto fail
 
