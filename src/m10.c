@@ -268,6 +268,11 @@ static unsigned long    ws_z_restore, ws_z_blit, ws_z_video;
  * after the original's tiny 2x2 grey/orange dot (SHELL_C_GREY/ORANGE)
  * proved hard to see in play. */
 #define ET_ALIEN_SHOT   11
+/* The player's own crash (spawn_ground_crash): an ET_SINK that also draws
+ * chop_rubble_e on its last two frames.  Every other ground explosion
+ * (shell, bomb, missile, destroyed tank) used to be ET_SINK too and so
+ * showed chopper wreckage for two frames (FIXES.md 1.7). */
+#define ET_WRECK        12
 #define ALIEN_SHOT_PX       4U    /* screen px, both directions */
 #define ALIEN_SHOT_C_LIGHT  12    /* light red: fresh shot */
 #define ALIEN_SHOT_C_DARK   4     /* dark red: past ALIEN_SHOT_FADE_GROUND */
@@ -4609,6 +4614,8 @@ static void spawn_ground_crash(void)
     ents[i].y = 0;
     ents[i].ground = (unsigned char)chop_ground;
     init_explosion(i);
+    ents[i].type = ET_WRECK;            /* y == 0 made it ET_SINK; this one
+                                         * alone gets the rubble sprite */
     ents[i].vy = 4;
 }
 
@@ -4635,7 +4642,7 @@ static void update_ents(void)
             update_missile(i);
         else if (t == ET_BOMB)
             update_bomb(i);
-        else if (t == ET_BOOM || t == ET_SINK)
+        else if (t == ET_BOOM || t == ET_SINK || t == ET_WRECK)
             update_boom(i);
     }
 }
@@ -4773,7 +4780,8 @@ static void draw_ents(unsigned seg, dirty_list *list)
                 blit_at(seg, sx, sy, bullet_missile_e, bullet_missile_o, list);
         } else if (e->type == ET_BOMB)
             blit_at(seg, sx, sy, bullet_bomb_e, bullet_bomb_o, list);
-        else if (e->type == ET_BOOM || e->type == ET_SINK) {
+        else if (e->type == ET_BOOM || e->type == ET_SINK
+                 || e->type == ET_WRECK) {
             unsigned eh;
 
             fi = (int)((unsigned char)e->vx % 5U);
@@ -4783,7 +4791,7 @@ static void draw_ents(unsigned seg, dirty_list *list)
             sy = world_to_sy((unsigned)e->y + (unsigned)e->ground + eh - 1U);
             blit_fire = 1;
             blit_aligned(seg, sx, sy, explosion_e[fi], list);
-            if (e->type == ET_SINK && fi >= 3)
+            if (e->type == ET_WRECK && fi >= 3)
                 blit_aligned(seg, sx, sy, chop_rubble_e, list);
             blit_fire = 0;
         }
