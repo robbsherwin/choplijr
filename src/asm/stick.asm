@@ -9,7 +9,8 @@
 ;
 ; Port 201h is the PCjr path.  The counting loop is copied from Paku Paku
 ; 1.6a SOURCE/JOYSTICK.PAS (joyStick1Axis / joyStick2Axis): CLI, OUT 201h,
-; count while the axis bits stay high, timeout CX=$7FFF.  Trixter's 1.6a
+; count while the axis bits stay high, timeout CX=STICK_TIMEOUT (Paku used
+; $7FFF; see pcjr.h for why it is 0x0FFF here).  Trixter's 1.6a
 ; note: CLI stops twitchy counts on a PCjr.  M5 uses joystick 1 only
 ; (Paku joyStick1Axis, bits 0,1; IBM first connector).  Stick B (bits 2,3)
 ; is implemented in stick_read_both but M5 does not call it.  INT 15h
@@ -42,7 +43,7 @@
         cpu     8086
 
 GAMEPORT        equ     0x0201
-STICK_TIMEOUT   equ     0x7FFF          ; Paku JOYSTICK.PAS CX=$7FFF; must match pcjr.h
+STICK_TIMEOUT   equ     0x0FFF          ; must match pcjr.h (Paku used $7FFF)
 STICK_LIVE_MAX  equ     (STICK_TIMEOUT - 16)
 
         segment _TEXT class=CODE align=2
@@ -70,7 +71,7 @@ kbd_broke:
 ;     unsigned *buttons)
 ;
 ; Paku Paku 1.6a joyStick1Axis then joyStick2Axis, verbatim counting:
-;   xor ax/bx/di, CX=$7FFF, CLI, OUT 201h, then
+;   xor ax/bx/di, CX=STICK_TIMEOUT, CLI, OUT 201h, then
 ;     SHR AL,1 / ADC BX,0 / ADD DI,AX / IN AL,DX / AND mask / LOOPNZ
 ; Stick A mask $03 (bits 0,1).  Stick B AND $0F then two SHRs (bits 2,3).
 ; Buttons: (~port >> 4) & 15, so bits 0-1 stick A, 2-3 stick B, 1 = pressed.

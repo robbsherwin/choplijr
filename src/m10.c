@@ -2337,7 +2337,8 @@ static unsigned apple_span_from_raw(unsigned raw, unsigned center,
         return APPLE_CENTER;
     if (raw >= center) {
         if (hi <= center)
-            hi = (center < 0x4000U) ? (unsigned)(center * 2U) : STICK_LIVE_MAX;
+            hi = (center < STICK_LIVE_MAX / 2U) ? (unsigned)(center * 2U)
+                                                : STICK_LIVE_MAX;
         span = (hi > center) ? (unsigned)(hi - center) : 1U;
         d = ((long)raw - (long)center) * 127L;
         d /= (long)span;
@@ -3186,10 +3187,11 @@ static void read_controls(void)
     ay = APPLE_CENTER;
     used_port = 0;
 
-    /* The Paku 201h loop counts to STICK_TIMEOUT (0x7FFF) with interrupts
-     * off.  A present stick discharges its one-shots and the loop leaves
-     * early; with nothing plugged in the axis bits never clear and every
-     * tick pays all 32767 IN instructions.  So: probe each tick until a
+    /* The Paku 201h loop counts to STICK_TIMEOUT with interrupts off.  A
+     * present stick discharges its one-shots and the loop leaves early;
+     * with nothing plugged in the axis bits never clear and every tick
+     * pays all STICK_TIMEOUT IN instructions (0x0FFF now; see pcjr.h for
+     * why it is no longer Paku's 0x7FFF).  So: probe each tick until a
      * live sample turns up, then keep probing forever.  If none ever does,
      * fall back to about one probe a second so a stick plugged in later is
      * still found.  A real stick held in a corner cannot trip this -- it
@@ -6178,7 +6180,7 @@ static void usage(void)
 "               for tank+hostage ticks.  Off by default: real cost else.\n"
 "  /?           this\n"
 "\n"
-"Stick: Paku Paku 1.6a port 201h loop (CLI, bits high, timeout 7FFFh).\n"
+"Stick: Paku Paku 1.6a port 201h loop (CLI, bits high, timeout 0FFFh).\n"
 "Joystick 1 only (first connector / Paku stick A, bits 0,1).  Analog\n"
 "mapped to the original Apple paddle tables.  Each side of rest is\n"
 "scaled to the full 0-255 Apple range (raw 0 = 0, timeout = 255)\n"
