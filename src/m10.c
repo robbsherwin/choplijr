@@ -450,6 +450,18 @@ static dirty_list        lists[2] = {
 static dirty_list        scenery_mark[2] = {
     { 0, DIRTY_MAX, scenery_r[0] }, { 0, DIRTY_MAX, scenery_r[1] }
 };
+/* Burning-house flame footprints only (FIXES.md 1.2 / 2.1).  The flame
+ * frame flips every 4 sim ticks whether or not the camera moves, and the
+ * two frames do not share an opaque silhouette, so the old frame has to
+ * be restored before the new one is drawn.  Keeping those rects out of
+ * scenery_mark means that restore touches nothing else: the intact
+ * houses, fence and base stay put.  One rect per burning house per
+ * visit, plus a visit's worth of duplicates between flips. */
+#define FLAME_MAX       12
+static dirty_rect        flame_r[2][FLAME_MAX];
+static dirty_list        flame_mark[2] = {
+    { 0, FLAME_MAX, flame_r[0] }, { 0, FLAME_MAX, flame_r[1] }
+};
 static unsigned char    chop_loaded;
 static unsigned char    curr_level;
 static unsigned char    curr_shots;
@@ -5220,6 +5232,7 @@ static void next_sortie(void)
     paint_world(seg_b);
     lists[0].n = lists[1].n = 0;
     scenery_mark[0].n = scenery_mark[1].n = 0;
+    flame_mark[0].n = flame_mark[1].n = 0;
     scenery_invalidate();          /* forces a full houses/fence/base redraw
                                      * next present, onto the wiped
                                      * background above -- without this,
@@ -5315,18 +5328,13 @@ static void blit_world(unsigned seg, unsigned wx, unsigned wy,
  * treats that row range as a plain solid-8 band for restore purposes, so
  * removing the retile left nothing else to fix here. */
 
-static int any_house_burning(void)
-{
-    unsigned h;
-
-    for (h = 0; h < N_HOUSES; h++)
-        if (house_states[h])
-            return 1;
-    return 0;
-}
-
-static void draw_houses(unsigned seg, dirty_list *list, int full,
-                        const dirty_rect *hit, unsigned nhit,
+/* list: scenery_mark[pg], where the house bodies, sills and debris are
+ * tracked for the scroll restore.  flist: flame_mark[pg], where only the
+ * flame overlay goes, so the fire-flip restore in run_viewer() erases the
+ * flames and nothing else.  The flame's bottom row overlaps the body's top
+ * row, so a flip redraws all three blits of a burning house. */
+static void draw_houses(unsigned seg, dirty_list *list, dirty_list *flist,
+                        int full, const dirty_rect *hit, unsigned nhit,
                         const dirty_bbox *bb, unsigned char fire_bit,
                         unsigned char fire_changed)
 {
@@ -5351,7 +5359,7 @@ static void draw_houses(unsigned seg, dirty_list *list, int full,
                                   world_to_sy(SILL_WORLD_Y), de, hit, nhit, bb)
                 || fire_changed) {
                 blit_aligned(seg, sx, sy, hs, list);
-                blit_aligned(seg, sx + 4, fy, hi, list);
+                blit_aligned(seg, sx + 4, fy, hi, flist);
                 blit_aligned(seg, world_to_sx(wx + 2U),
                              world_to_sy(SILL_WORLD_Y), de, list);
             }
@@ -5390,14 +5398,9 @@ static unsigned fence_tower_x(int tower)
     return (unsigned)((long)FENCE_X + (d & ~1L));
 }
 
-/* fire_changed: see draw_base's comment on the same parameter -- a burning
- * house's fire-frame flip forces a scenery_mark restore (run_viewer,
- * any_house_burning()) that erases the fence's tracked footprint here too,
- * whether or not a fence tower is anywhere near that house, and nothing
- * else guarantees a redraw for it that same tick. */
 static void draw_fence(unsigned seg, dirty_list *list, int full,
                        const dirty_rect *hit, unsigned nhit,
-                       const dirty_bbox *bb, unsigned char fire_changed)
+                       const dirty_bbox *bb)
 {
     int t;
     unsigned wx;
@@ -5408,7 +5411,7 @@ static void draw_fence(unsigned seg, dirty_list *list, int full,
         wx = fence_tower_x(t);
         sx = world_to_sx(wx);
         sy = world_to_sy(fence_world_y[t]);
-        if (full || fire_changed || spr_hits_dirty(sx, sy, fence_e[t], hit, nhit, bb))
+        if (full || spr_hits_dirty(sx, sy, fence_e[t], hit, nhit, bb))
             blit_world(seg, wx, fence_world_y[t], fence_e[t], fence_o[t],
                        list);
     }
@@ -5460,40 +5463,29 @@ static int pad_hits_dirty(const dirty_rect *hit, unsigned nhit,
                           (int)PAD_ROWS, hit, nhit, bb);
 }
 
-/* fire_changed: a burning house's fire-frame flip (every 4 sim ticks, from
- * sortie 1 on -- see run_viewer's any_house_burning() gate) forces a
- * restore_list over scenery_mark[pg], which is the SAME tracked-footprint
- * list draw_pad/draw_base/draw_fence dirty_add into -- so that restore
- * erases the base and fence right along with the houses. draw_houses
- * self-heals from this because it re-checks its own fire_changed every
- * call; draw_pad/draw_base/draw_fence had no such signal, so whenever
- * this fire-triggered restore fired while the player was not, by luck,
- * also overlapping them via the ordinary sprite hit-test, they stayed
- * erased until the next real scroll -- reported as the base "disappearing
- * and reappearing" while hovering near the start, where scroll_clamp
- * pins scroll_x and a real full_sc scroll redraw may not happen for many
- * seconds. Reusing fire_changed here (not a new flag) because it is
- * already computed once per draw_scenery call for exactly this
- * restore/redraw pairing. */
+/* The fire-flip restore used to run over the whole of scenery_mark, which
+ * erased the pad, base and fence along with the flames and so forced a
+ * fire_changed redraw of all of them every 4 ticks; the flames now live in
+ * flame_mark, so nothing here is ever erased by a flip and the only
+ * animation this needs to track is the flag's own. */
 static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
                       int full, const dirty_rect *hit, unsigned nhit,
-                      const dirty_bbox *bb, unsigned pg,
-                      unsigned char fire_changed)
+                      const dirty_bbox *bb, unsigned pg)
 {
     unsigned bx = BASE_X + 0x49U;
     unsigned px = BASE_X + 0x71U;
     unsigned char flag_bit, flag_changed;
     unsigned char *flag;
 
-    if (full || fire_changed || pad_hits_dirty(hit, nhit, bb))
+    if (full || pad_hits_dirty(hit, nhit, bb))
         draw_pad(seg, list);
 
-    if (full || fire_changed
+    if (full
         || spr_hits_dirty(world_to_sx(bx), world_to_sy(BASE_BUILD_Y),
                           base_building_e, hit, nhit, bb))
         blit_world(seg, bx, BASE_BUILD_Y, base_building_e, base_building_o,
                    list);
-    if (full || fire_changed
+    if (full
         || spr_hits_dirty(world_to_sx(px), world_to_sy(FLAGPOLE_Y),
                           base_flagpole_e, hit, nhit, bb))
         blit_world(seg, px, FLAGPOLE_Y, base_flagpole_e, base_flagpole_o,
@@ -5503,7 +5495,7 @@ static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
     flag_changed = (unsigned char)(flag_bit != last_flag_bit[pg]);
     last_flag_bit[pg] = flag_bit;
     flag = flag_bit ? base_flag_01_e : base_flag_00_e;
-    if (full || fire_changed || flag_changed
+    if (full || flag_changed
         || spr_hits_dirty(world_to_sx(px + 2U), world_to_sy(FLAGPOLE_Y),
                           flag, hit, nhit, bb)) {
         if (flag_bit)
@@ -5531,17 +5523,16 @@ static void draw_scenery(unsigned seg, unsigned frame, dirty_list *list,
         dirty_bbox_calc(&bb, hit, nhit);
         bbp = &bb;
     }
-    /* Computed once and shared: run_viewer's any_house_burning() gate
-     * compares sim_frame the same way against this same last_fire_bit[pg]
-     * *before* calling here, to decide whether to restore scenery_mark[pg]
-     * (which houses/fence/base all dirty_add into) ahead of this redraw --
-     * see draw_base's comment on its fire_changed parameter. */
+    /* run_viewer's fire-flip gate compares sim_frame the same way against
+     * this same last_fire_bit[pg] *before* calling here, to decide whether
+     * to restore flame_mark[pg] ahead of this redraw. */
     fire_bit = (unsigned char)((frame / 4U) & 1U);
     fire_changed = (unsigned char)(fire_bit != last_fire_bit[pg]);
     last_fire_bit[pg] = fire_bit;
-    draw_houses(seg, list, full, hit, nhit, bbp, fire_bit, fire_changed);
-    draw_fence(seg, list, full, hit, nhit, bbp, fire_changed);
-    draw_base(seg, frame, list, full, hit, nhit, bbp, pg, fire_changed);
+    draw_houses(seg, list, &flame_mark[pg], full, hit, nhit, bbp, fire_bit,
+                fire_changed);
+    draw_fence(seg, list, full, hit, nhit, bbp);
+    draw_base(seg, frame, list, full, hit, nhit, bbp, pg);
     ws_kind = WS_K_SPRITE;
 }
 
@@ -5907,6 +5898,8 @@ static void run_viewer(void)
     lists[1].n = 0;
     scenery_mark[0].n = 0;
     scenery_mark[1].n = 0;
+    flame_mark[0].n = 0;
+    flame_mark[1].n = 0;
     scenery_invalidate();
     last_flag_bit[0] = last_flag_bit[1] = 0xFF;
     last_fire_bit[0] = last_fire_bit[1] = 0xFF;
@@ -6003,33 +5996,25 @@ static void run_viewer(void)
             full_sc = scrolled || scenery_full[back];
             if (full_sc) {
                 restore_list(back_seg, &scenery_mark[back]);
-            } else if (any_house_burning()) {
+                restore_list(back_seg, &flame_mark[back]);
+            } else if (flame_mark[back].n != 0U) {
                 /* A burning house's flame frame changes every 4 sim ticks
-                 * (draw_houses' fire_bit) whether or not the camera moves.
-                 * house_fire_00_e/_01_e do not share the same opaque
-                 * silhouette, so drawing the new frame straight over the
-                 * old one leaves a stale fragment RLE transparency cannot
-                 * erase -- only a background restore can, and this is the
-                 * only place one happens on this page. Previously that
-                 * restore only ran on the *next* real scroll (docs/M10.md
-                 * item 5's first fix), which is fine for "fly past and
-                 * back" but not when the camera barely moves (hovering /
-                 * rapid direction reversal near the barracks): several
-                 * flame flips can stack up, unrestored, before scrolling
-                 * ever resumes. Restoring scenery_mark[back]'s already-
-                 * tracked flame footprint here, on the same tick
-                 * draw_houses independently notices fire_changed and
-                 * redraws that one house, closes the gap without forcing
-                 * full_sc's much bigger unconditional redraw of every
-                 * house/fence/base -- house 3 starts burning from sortie 1
-                 * (see next_sortie/init_hostages), so that would otherwise
-                 * run every 4 ticks for most of a normal game, not the
-                 * rare case this fix was scoped for. any_house_burning()
-                 * keeps this check itself free whenever nothing is lit. */
+                 * (draw_houses' fire_bit) whether or not the camera moves,
+                 * and house_fire_00_e/_01_e do not share an opaque
+                 * silhouette, so the old frame has to be restored before
+                 * the new one is drawn.  Only the flame rects are restored
+                 * here (flame_mark, not scenery_mark): the earlier version
+                 * restored the whole scenery list, which erased the intact
+                 * houses, fence and base too, redrew the fence and base
+                 * every 4 ticks for the whole game, and left the intact
+                 * houses erased until the next scroll (FIXES.md 1.2).
+                 * flame_mark[back].n != 0 is also the "a burning house is
+                 * actually on this page" gate: an off-screen flame never
+                 * gets a rect, so a far-away fire costs nothing here. */
                 unsigned char fb = (unsigned char)((sim_frame / 4U) & 1U);
 
                 if (fb != last_fire_bit[back])
-                    restore_list(back_seg, &scenery_mark[back]);
+                    restore_list(back_seg, &flame_mark[back]);
             }
 
             if (opt_phases) {
