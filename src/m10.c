@@ -5779,19 +5779,28 @@ static unsigned long bios_ticks(void)
     return ((unsigned long)hi << 16) | (unsigned long)lo;
 }
 
+/* Release waits poll kbd_held(), never kbd_is_down(): the latter ORs in
+ * kbd_pulse[], which every make code latches until kbd_clear_pulse() runs,
+ * so a "while (kbd_is_down(...))" release wait with no clear inside it can
+ * never exit once the key has been pressed -- SPACE on a logo screen hung
+ * the machine this way (FIXES.md 1.1).  kbd_is_down() is still the right
+ * test for *detecting* a tap, because a make+break inside one retrace only
+ * shows up in the pulse latch. */
 static int wait_title_hold(void)
 {
     unsigned i;
 
-    while (kbd_is_down(SCAN_SPACE) || kbd_is_down(SCAN_ESC))
+    while (kbd_held(SCAN_SPACE) || kbd_held(SCAN_ESC))
         vid_wait_retrace();
+    kbd_clear_pulse();
     for (i = 0; i < TITLE_HOLD; i++) {
         vid_wait_retrace();
         if (kbd_is_down(SCAN_ESC))
             return 0;
         if (kbd_is_down(SCAN_SPACE)) {
-            while (kbd_is_down(SCAN_SPACE))
+            while (kbd_held(SCAN_SPACE))
                 vid_wait_retrace();
+            kbd_clear_pulse();
             return 1;
         }
     }
@@ -6517,8 +6526,11 @@ int main(int argc, char **argv)
                 cleanup();
                 return 0;
             }
-            while (kbd_is_down(SCAN_SPACE))
-                ;
+            /* kbd_held, not kbd_is_down: a typematic make while SPACE is
+             * still down would latch the pulse and this loop has no clear
+             * in it (FIXES.md 1.1). */
+            while (kbd_held(SCAN_SPACE))
+                vid_wait_retrace();
             kbd_clear_pulse();
             if (!play_keyboard)
                 capture_stick_rest(0);
