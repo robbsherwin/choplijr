@@ -193,6 +193,10 @@ static unsigned long    ws_min_restore, ws_max_restore;
 static unsigned long    ws_min_blit, ws_max_blit;
 static unsigned long    ws_min_video, ws_max_video;
 static unsigned         ws_z_did, ws_z_ovf, ws_z_frame, ws_z_ticks;
+static unsigned         ws_dirty_dropped;   /* dirty_add() on a full list:
+                                             * each one is a sprite that
+                                             * will never be erased
+                                             * (FIXES.md 1.12) */
 static unsigned long    ws_z_restore, ws_z_blit, ws_z_video;
 
 #define MODEL_BYTE_SEG  0xF000U
@@ -1870,6 +1874,7 @@ static void ws_reset(void)
     ws_max_restore = ws_max_blit = ws_max_video = 0UL;
     ws_z_did = ws_z_ovf = ws_z_frame = ws_z_ticks = 0;
     ws_z_restore = ws_z_blit = ws_z_video = 0UL;
+    ws_dirty_dropped = 0;
 }
 
 static void ws_begin_tick(void)
@@ -1962,6 +1967,9 @@ static void print_workset(void)
            ws_min_video, av, ws_max_video);
     printf("  avg mountain %lu  scenery %lu  sprites %lu\n",
            am, asce, asp);
+    if (ws_dirty_dropped != 0U)
+        printf("  DIRTY LIST FULL %u times: rects dropped, ghosts likely.\n",
+               ws_dirty_dropped);
     printf("  restore is even-padded dirty-rect fill_rect bytes.\n");
     printf("  rle blit is skip-stripped payload (opaque + mixed bytes).\n");
     printf("  mountain includes the 320-byte band fill when the ridge\n");
@@ -2056,8 +2064,12 @@ static void dirty_add(dirty_list *list, unsigned xbyte, unsigned y,
     dirty_rect *d;
     unsigned    rw, xb;
 
-    if (list == 0 || list->n >= list->cap || wbytes == 0U || rows == 0U)
+    if (list == 0 || wbytes == 0U || rows == 0U)
         return;
+    if (list->n >= list->cap) {
+        ws_dirty_dropped++;
+        return;
+    }
     rw = (wbytes + 1U) & ~1U;
     xb = xbyte;
     if ((unsigned)(xb + rw) > M8_BYTES_PER_ROW)
