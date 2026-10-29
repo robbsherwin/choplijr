@@ -387,6 +387,13 @@ typedef struct {
     dirty_rect *r;
 } dirty_list;
 
+/* Min/max over a dirty list, for O(1) rejection in the hit tests; see
+ * dirty_bbox_calc. */
+typedef struct {
+    unsigned xb0, xb1;      /* byte-column span [xb0, xb1) */
+    unsigned y0, y1;        /* row span [y0, y1) */
+} dirty_bbox;
+
 static unsigned orig_mode;
 static unsigned orig_pages;
 static int      mode_changed;
@@ -421,6 +428,13 @@ static unsigned char    fire_down;
 static unsigned char    fire_held;
 static unsigned char    chop_ground;
 static unsigned         sim_frame;
+/* (sim_frame / 2) % 3 and % 5, kept as counters so draw_chopper and the
+ * death explosions do not pay a DIV per present for them (FIXES.md 2.6).
+ * Advanced in sim_tick() whenever sim_frame becomes even; zeroed with
+ * sim_frame in run_viewer(). */
+static unsigned char    rotor_phase;    /* 0..2 */
+static unsigned char    boom_phase;     /* 0..4 */
+static unsigned         dgroup_seg;     /* data_seg(), cached in main() */
 static unsigned         stick_cx0, stick_cy0;   /* rest: stick 1 / bits 0,1 */
 static unsigned         calib_n;
 static unsigned long    calib_sx0, calib_sy0;
@@ -1226,7 +1240,8 @@ static void draw_sky_gradient(unsigned seg, unsigned gi)
 }
 
 static void draw_stars_and_moon(unsigned seg, unsigned pg,
-                                const dirty_rect *hit, unsigned nhit);
+                                const dirty_rect *hit, unsigned nhit,
+                                const dirty_bbox *bbp);
 
 static void paint_world(unsigned seg)
 {
@@ -1242,7 +1257,7 @@ static void paint_world(unsigned seg)
                                         M8_SOLID(M8_IDX_GROUND_HI));
     fill_band_m8(seg, GROUND_TOP_ROW+1, 199 - GROUND_TOP_ROW,
                                         M8_SOLID(M8_IDX_GROUND));
-    draw_stars_and_moon(seg, 0, 0, 0);
+    draw_stars_and_moon(seg, 0, 0, 0, 0);
 }
 
 /* Debug HUD: 4x6 glyphs, bit 3 = leftmost pixel.  Grey band, ink black. */
@@ -1412,7 +1427,7 @@ static void hud_draw_digit5(unsigned seg, unsigned x, unsigned d)
  * and 6 (odd 1px inset, not byte-aligned) still plot pixel by pixel. */
 static void hud_draw_bubble(unsigned seg, unsigned x0)
 {
-    unsigned x, y, xa, xb, xbyte0;
+    unsigned y, xbyte0;
 
     xbyte0 = x0 / 2U;
     fill_rect_m8(seg, xbyte0 + 1U, 0U, (HUD_BUBBLE_W - 4U) / 2U, 1U,
@@ -1422,11 +1437,13 @@ static void hud_draw_bubble(unsigned seg, unsigned x0)
     fill_rect_m8(seg, xbyte0 + 1U, 7U, (HUD_BUBBLE_W - 4U) / 2U, 1U,
                  M8_SOLID(HUD_BUBBLE));
 
+    /* Rows 1 and 6 (1 px inset): the odd edge pixels by hand, the ten
+     * whole bytes between them in one fill (FIXES.md 2.6). */
     for (y = 1U; y <= 6U; y += 5U) {
-        xa = x0 + 1U;
-        xb = x0 + HUD_BUBBLE_W - 1U;
-        for (x = xa; x < xb; x++)
-            hud_plot_px(seg, x, y, HUD_BUBBLE);
+        hud_plot_px(seg, x0 + 1U, y, HUD_BUBBLE);
+        fill_rect_m8(seg, xbyte0 + 1U, y, (HUD_BUBBLE_W - 4U) / 2U, 1U,
+                     M8_SOLID(HUD_BUBBLE));
+        hud_plot_px(seg, x0 + HUD_BUBBLE_W - 2U, y, HUD_BUBBLE);
     }
 }
 
@@ -1538,12 +1555,8 @@ static void plot_px(unsigned seg, unsigned x, unsigned y, unsigned char c);
  * over 36 stars, draw_scenery over every house/fence/base part) compute this
  * once and reuse it, so dirty_hits_px/dirty_hits_box can reject most probes
  * in O(1) instead of re-scanning up to DIRTY_MAX rects every time.  Valid
- * only when nhit != 0; callers must not build or consult one otherwise. */
-typedef struct {
-    unsigned xb0, xb1;      /* byte-column span [xb0, xb1) */
-    unsigned y0, y1;        /* row span [y0, y1) */
-} dirty_bbox;
-
+ * only when nhit != 0; callers must not build or consult one otherwise.
+ * (dirty_bbox itself is declared with dirty_rect, above.) */
 static void dirty_bbox_calc(dirty_bbox *bb, const dirty_rect *hit,
                             unsigned nhit)
 {
@@ -1742,13 +1755,14 @@ static void reset_star_tracking(void)
 
 static void restore_rect(unsigned seg, const dirty_rect *d);
 
+/* bbp: the bounding box of (hit, nhit), computed once by the caller and
+ * shared with draw_scenery; 0 when nhit == 0 or hit == 0. */
 static void draw_stars_and_moon(unsigned seg, unsigned pg,
-                                const dirty_rect *hit, unsigned nhit)
+                                const dirty_rect *hit, unsigned nhit,
+                                const dirty_bbox *bbp)
 {
     unsigned i, ph, sx, star_shift;
     unsigned char c, old_sx;
-    dirty_bbox bb;
-    const dirty_bbox *bbp;
     dirty_rect er;
 
     /* Moon: unchanged, still conditional on the incoming (already-restored)
@@ -1757,11 +1771,6 @@ static void draw_stars_and_moon(unsigned seg, unsigned pg,
      * full draw) means "no filtering, always hit"; hit!=0 && nhit==0 means
      * a genuinely empty dirty list this tick, nothing to check against. */
     if (hit == 0 || nhit != 0U) {
-        bbp = 0;
-        if (hit != 0) {
-            dirty_bbox_calc(&bb, hit, nhit);
-            bbp = &bb;
-        }
         if (dirty_hits_box(hit, nhit, bbp, MOON_X0, MOON_Y0,
                            MOON_X0 + 10U, MOON_Y0 + 16U))
             draw_moon(seg);
@@ -1771,11 +1780,16 @@ static void draw_stars_and_moon(unsigned seg, unsigned pg,
      * page -- draw every visible star, but there is nothing tracked yet
      * to erase and nothing to record (next_sortie/game-start reset
      * star_last_sx to STAR_NONE right after this runs anyway). */
-    star_shift = (unsigned)((scroll_x >> STAR_PARALLAX_SHIFT) % M8_WIDTH_PX);
+    /* scroll_x <= SCROLL_START (4616), so >> 7 is at most 36: already
+     * inside 0..159, no modulo needed (FIXES.md 2.6). */
+    star_shift = scroll_x >> STAR_PARALLAX_SHIFT;
     er.wbytes = 1;
     er.rows   = 1;
     for (i = 0; i < N_STARS; i++) {
-        sx = (star_x[i] + M8_WIDTH_PX * 4U - star_shift) % M8_WIDTH_PX;
+        sx = star_x[i];                 /* (star_x - shift) mod 160 */
+        if (sx < star_shift)
+            sx += M8_WIDTH_PX;
+        sx -= star_shift;
         if (i & 1U) {
             /* White, dark grey, black, yellow.  4 sim ticks per colour. */
             ph = ((sim_frame / 4U) + i) & 3U;
@@ -2315,11 +2329,11 @@ static void blit_at(unsigned seg, int x_px, int y,
 
         if (blit_fire || opt_forcefire)
             n = blit_rle_m8_fire_rows(seg, (unsigned)xbyte0, (unsigned)y,
-                                      data_seg(), (unsigned)p,
+                                      dgroup_seg, (unsigned)p,
                                       (unsigned)rows);
         else
             n = blit_rle_m8_rows(seg, (unsigned)xbyte0, (unsigned)y,
-                                 data_seg(), (unsigned)p, (unsigned)rows);
+                                 dgroup_seg, (unsigned)p, (unsigned)rows);
         if (!opt_noworkset)
             ws_add_blit(n);
     } else {
@@ -4536,9 +4550,10 @@ static void update_alien(int i)
         if (e->vy > -1)
             e->vy--;
     }
-    e->dir = (signed char)(((unsigned char)e->dir + 1U) % 3U);
+    /* dir cycles 0,1,2 (it is also the ground drift ent_basic_phys adds);
+     * a compare beats two DIVs per saucer per tick. */
+    e->dir = (signed char)(e->dir >= 2 ? 0 : e->dir + 1);
     ent_basic_phys(i, 0);
-    e->dir = (signed char)(((unsigned char)e->dir) % 3U);
     {
         int dy, d;
 
@@ -4825,7 +4840,9 @@ static void draw_ents(unsigned seg, dirty_list *list)
             blit_aligned(seg, sx, sy, spr, list);
         } else if (e->type == ET_ALIEN) {
             blit_aligned(seg, sx, sy, alien_e[0], list);
-            fi = (int)((unsigned char)e->dir % 3U);
+            fi = (int)(unsigned char)e->dir; /* update_alien keeps it 0..2 */
+            if (fi > 2)
+                fi = 0;
             blit_aligned(seg, sx + 2, sy - 6, alien_e[1 + fi], list);
         } else if (e->type == ET_BULLET)
             blit_at(seg, sx, sy, bullet_chop_e, bullet_chop_o, list);
@@ -4850,7 +4867,9 @@ static void draw_ents(unsigned seg, dirty_list *list)
                  || e->type == ET_WRECK) {
             unsigned eh;
 
-            fi = (int)((unsigned char)e->vx % 5U);
+            fi = (int)(unsigned char)e->vx; /* 0..4: update_boom frees at 5 */
+            if (fi > 4)
+                fi = 4;
             eh = (unsigned)explosion_e[fi][1];
             if (eh == 0U)
                 eh = 1U;
@@ -4866,7 +4885,7 @@ static void draw_ents(unsigned seg, dirty_list *list)
         unsigned eh, wy;
         int      fi2, k, dx;
 
-        fi2 = (int)((sim_frame / 2U) % 5U);
+        fi2 = (int)boom_phase;          /* == (sim_frame / 2) % 5 */
         eh = (unsigned)explosion_e[fi2][1];
         if (eh == 0U)
             eh = 1U;
@@ -4878,9 +4897,10 @@ static void draw_ents(unsigned seg, dirty_list *list)
         blit_fire = 1;
         for (k = 0; k < 3; k++) {
             dx = (k - 1) * 10;
-            fi2 = (int)((sim_frame / 2U + (unsigned)k) % 5U);
             blit_aligned(seg, sx + dx, sy - ((k * 3) & 3),
                          explosion_e[fi2], list);
+            if (++fi2 >= 5)             /* (boom_phase + k) % 5 */
+                fi2 = 0;
         }
         blit_fire = 0;
     }
@@ -5436,6 +5456,12 @@ static void sim_tick(void)
     if (banner_left != 0U)
         banner_left--;
     sim_frame++;
+    if ((sim_frame & 1U) == 0U) {
+        rotor_phase = (unsigned char)(rotor_phase == 2U ? 0U
+                                                        : rotor_phase + 1U);
+        boom_phase  = (unsigned char)(boom_phase == 4U ? 0U
+                                                       : boom_phase + 1U);
+    }
     hud_tilt = accelx;
     hud_vx = velx;
     hud_vy = (int)(signed char)((unsigned)vely >> 8);
@@ -5505,26 +5531,31 @@ static void draw_houses(unsigned seg, dirty_list *list, dirty_list *flist,
     }
 }
 
+/* 16-bit on purpose: delta is FENCE_X - scroll_x - 0x8C, between about
+ * -290 (scroll_x at SCROLL_START) and +3640 (at SCROLL_END); doubled it
+ * still fits an int, so the long arithmetic this used was five sets of
+ * 32-bit shifts and masks per present for nothing (FIXES.md 2.6).  >> on
+ * a negative int is arithmetic in Open Watcom, as it was on the long. */
 static unsigned fence_tower_x(int tower)
 {
-    long delta;
-    long d;
+    int delta;
+    int d;
 
-    delta = (long)FENCE_X - (long)scroll_x - 0x8CL;
-    if (delta & 1L)
+    delta = (int)FENCE_X - (int)scroll_x - 0x8C;
+    if (delta & 1)
         delta--;
     if (tower == 0)
-        return (unsigned)((long)FENCE_X + (delta << 1));
+        return (unsigned)((int)FENCE_X + (delta << 1));
     if (tower == 1)
-        return (unsigned)((long)FENCE_X + delta);
+        return (unsigned)((int)FENCE_X + delta);
     d = delta >> 1;
     if (tower == 2)
-        return (unsigned)((long)FENCE_X + (d & ~1L));
+        return (unsigned)((int)FENCE_X + (d & ~1));
     d >>= 1;
     if (tower == 3)
-        return (unsigned)((long)FENCE_X + (d & ~1L));
+        return (unsigned)((int)FENCE_X + (d & ~1));
     d >>= 1;
-    return (unsigned)((long)FENCE_X + (d & ~1L));
+    return (unsigned)((int)FENCE_X + (d & ~1));
 }
 
 static void draw_fence(unsigned seg, dirty_list *list, int full,
@@ -5640,18 +5671,13 @@ static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
  * redraw) or 0 (static hole-fill; do not dirty_add). */
 static void draw_scenery(unsigned seg, unsigned frame, dirty_list *list,
                          int full, const dirty_rect *hit, unsigned nhit,
-                         unsigned pg)
+                         const dirty_bbox *bbp, unsigned pg)
 {
-    dirty_bbox bb;
-    const dirty_bbox *bbp;
     unsigned char fire_bit, fire_changed;
 
     ws_kind = WS_K_SCENERY;
-    bbp = 0;
-    if (!full && hit != 0 && nhit != 0U) {
-        dirty_bbox_calc(&bb, hit, nhit);
-        bbp = &bb;
-    }
+    if (full || hit == 0 || nhit == 0U)
+        bbp = 0;
     /* run_viewer's fire-flip gate compares sim_frame the same way against
      * this same last_fire_bit[pg] *before* calling here, to decide whether
      * to restore flame_mark[pg] ahead of this redraw. */
@@ -5767,8 +5793,8 @@ static void draw_chopper(unsigned seg, dirty_list *list)
         body_y = world_to_sy(top);
     }
 
-    main_i = (sim_frame / 2U) % 3U;
-    tail_i = (sim_frame / 2U) % 4U;
+    main_i = rotor_phase;               /* == (sim_frame / 2) % 3 */
+    tail_i = (sim_frame / 2U) & 3U;
     flip = (turn_state < 0) ? 1 : 0;
     bw = (int)be[0];
 
@@ -6047,6 +6073,8 @@ static void run_viewer(void)
     dbg_xmax = dbg_ymax = 0;
     dbg_x = dbg_y = 0;
     sim_frame = 0;
+    rotor_phase = 0;
+    boom_phase = 0;
     back = 0;
     ws_reset();
     ph_sim = ph_present = ph_flip = ph_idle = 0UL;
@@ -6089,6 +6117,10 @@ static void run_viewer(void)
             int      full_sc;
             int      do_z;
             unsigned long tp0, tp1, t_simend;
+            dirty_bbox        hbb;      /* bbox of this page's last sprite
+                                         * rects, shared by the moon check
+                                         * and the scenery hit-tests */
+            const dirty_bbox *hbbp;
 
             back_seg = back ? seg_b : seg_a;
             prev_scroll = scroll_x;
@@ -6121,8 +6153,13 @@ static void run_viewer(void)
                 ztimer_on();
 
             old_n = lists[back].n;
+            hbbp = 0;
+            if (old_n != 0U) {
+                dirty_bbox_calc(&hbb, lists[back].r, old_n);
+                hbbp = &hbb;
+            }
             restore_list(back_seg, &lists[back]);
-            draw_stars_and_moon(back_seg, back, lists[back].r, old_n);
+            draw_stars_and_moon(back_seg, back, lists[back].r, old_n, hbbp);
 
             full_sc = scrolled || scenery_full[back];
             if (full_sc) {
@@ -6176,7 +6213,7 @@ static void run_viewer(void)
 
             if (full_sc) {
                 draw_scenery(back_seg, sim_frame, &scenery_mark[back], 1,
-                             0, 0U, (unsigned)back);
+                             0, 0U, 0, (unsigned)back);
                 scenery_full[back] = 0;
             } else {
                 /* full=0 so this only draws what hit-tests dirty or has an
@@ -6193,7 +6230,7 @@ static void run_viewer(void)
                  * means the next full_sc pass's restore_list will erase it
                  * before redrawing, closing that gap. */
                 draw_scenery(back_seg, sim_frame, &scenery_mark[back], 0,
-                             lists[back].r, old_n, (unsigned)back);
+                             lists[back].r, old_n, hbbp, (unsigned)back);
             }
 
             if (opt_phases) {
@@ -6602,6 +6639,7 @@ int main(int argc, char **argv)
     int           flew;
 
     setbuf(stdout, NULL);
+    dgroup_seg = data_seg();            /* once, not per blit */
 
     if (!parse_args(argc, argv))
         return 1;
