@@ -494,6 +494,10 @@ static unsigned char    tank_burst_shot[MAX_ENT];
 /* 1 while a tank shell's dirt burst is in ordinance_check: chopper
  * overlap is the 2x2, not Apple's ±12 world-px pad. */
 static unsigned char    shell_chop_aabb;
+/* 1 while check_bullet() runs ordinance_check() for a player shot that it
+ * has already turned into a boom: ignite_from_ent() keys the house sound
+ * off ET_BULLET, which that path had just overwritten (FIXES.md 1.10). */
+static unsigned char    ignite_by_player;
 static unsigned char    alien_odd;
 static unsigned char    rnd_s, rnd_seed;
 
@@ -3762,9 +3766,11 @@ static void ignite_from_ent(int ei)
     if (house_states[dh] == 0U) {
         house_states[dh] = 1;
         scenery_invalidate();
-        /* Player bombs are still ET_BULLET here; tank shells have already
-         * become BOOM.  Don't let off-screen shells chirp the house. */
-        if (ents[ei].type == ET_BULLET)
+        /* Player bombs are still ET_BULLET on the update_bullet() path;
+         * check_bullet()'s roof hit has already made one a boom and says
+         * so with ignite_by_player.  Tank shells are BOOM with the flag
+         * clear: don't let off-screen shells chirp the house. */
+        if (ents[ei].type == ET_BULLET || ignite_by_player)
             snd_play(SND_HOUSE);
     }
 }
@@ -3973,7 +3979,9 @@ static void check_bullet(int ei)
         if ((signed char)dl >= 0 && dl < 0x18U && dh < 4U) {
             e->y = 0;
             init_explosion(ei);
+            ignite_by_player = 1;
             ordinance_check(ei);
+            ignite_by_player = 0;
             if (curr_shots)
                 curr_shots--;
             return;
