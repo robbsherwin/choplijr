@@ -1465,7 +1465,10 @@ static void hud_put_signed(char *dst, int v)
 
 static void draw_hud(unsigned seg, int pg)
 {
-    char buf[36];
+    /* Worst case today is 35 characters ("W1 S1 A1 D1 T-5 X-5376 Y-10
+     * A15.1/1") and it only stays there because vely's high byte is
+     * bounded; 36 had no slack at all (FIXES.md 1.9). */
+    char buf[48];
     char ts[8], xs[8], ys[8];
     unsigned i;
 
