@@ -12,6 +12,50 @@ remain the judge.
 Each item gives: what you would see, why, where, and a fix direction. Items are
 ordered by how much they matter, highest first, within each section.
 
+## Status (2026-10-29)
+
+Every item below was worked through in its own branch and merged to `main`
+through pull requests #9 to #23 (with the forgotten `milestone-11` branch
+merged in between as #14). None of it has been built with Open Watcom or run
+on hardware yet: each PR passed a gcc syntax check and nasm 2.16 assembly
+only. The first thing to do is build, run the pad benchmark, and compare
+byte counts (they should be identical except where noted) and BIOS ticks.
+
+| Item | Outcome | PR |
+|---|---|---|
+| 1.1 SPACE on a logo hangs | Fixed: release waits poll `kbd_held()` and clear the pulse | #9 |
+| 1.2 Intact barracks vanish | Fixed: flame rects in their own `flame_mark[2]`, only those restored on a flip | #11 |
+| 1.3 Calibration fallback unreachable | Fixed: `calib_n` only set when a rest was measured | #12 |
+| 1.4 Dead-stick CLI stall | Timeout 0x7FFF to 0x0FFF in `pcjr.h` and `stick.asm`; check `/stick` raw counts stay in the hundreds | #13 |
+| 1.5 Sprites pop out at the HUD edge | Fixed: `blit_at` walks past the HUD rows, new `_rows` blitter entries | #21 |
+| 1.6 Bottom clip not applied | Fixed: same change, row count passed to the blitter | #21 |
+| 1.7 Rubble on every ground explosion | Fixed: new `ET_WRECK` for the chopper crash only; revert if the original shows rubble everywhere | #15 |
+| 1.8 Port 61h mux left on exit | Fixed: `snd_shutdown()` restores it from `cleanup()` | #16 |
+| 1.9 Debug HUD buffer | `buf[48]` | #17 |
+| 1.10 Ignition sound path | Fixed with an `ignite_by_player` flag around the roof-hit call | #18 |
+| 1.11 Shell-slot aliasing | **No change.** A shell only leaves `ET_SHELL` by becoming a boom, which holds its slot for 5 ticks, and the owning tank re-checks every tick, so the slot cannot be reallocated to another shell in the window. Left as a note. | - |
+| 1.12 Silent dirty-rect drops | Counted and printed in the WORKSET report | #19 |
+| 2.1 Whole-scenery restore every 4 ticks | Fixed with 1.2; pad restore bytes should fall back toward 872 | #11 |
+| 2.2 Blitter per-row CALL and DX save | Row body is a macro expanded per bank; `LODSW` for the skip/run pair | #21 |
+| 2.3 MUL in row-address prologues | 100-entry `rowpair_tab` lookup in all five routines | #20 |
+| 2.4 Byte-packed `dirty_rect` | Done; lists carry `n`, `cap`, pointer. Re-check DGROUP in `m10.map` | #10 |
+| 2.5 Joystick timeout | See 1.4 | #13 |
+| 2.6 Small things | DIVs, `fence_tower_x` in int, cached `data_seg()`, one bbox calc, HUD bubble rows. WORKSET gating deliberately **not** changed: the pad benchmark depends on it | #22 |
+| 2.7 MOVSW runs | Not attempted; measure 2.2/2.3 first | - |
+| 3.1 Dead code and stale comments | `opt_retrace`, `RETRACE_DEFAULT`, `stick_read_both` removed; comments fixed. Text trimming not done, 2.4 bought the room | #23 |
+| 3.2 Debug keys | P teleport under `DEBUG_KEYS`, on by default in the makefile | #23 |
+| 3.3 Doc drift | `docs/M10.md` item 7 annotated, `m10.c` header fixed | #23 |
+| 3.4 Keyboard hook notes | Informational, no change | - |
+
+Also merged: `milestone-11` (RLE moon, star positions, `/debug=1`, 640 KB
+configs) as #14; it merged cleanly on top of #10 to #13.
+
+One thing noticed on the way and left alone: `build.bat` compiles only
+`m1.c` and still uses `-os`, where the makefile moved to `-ot` after the
+hardware measurement. Harmless, since nothing ships from it.
+
+The original review follows unchanged.
+
 ---
 
 ## 1. Bugs and glitches
