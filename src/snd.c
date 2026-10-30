@@ -78,6 +78,13 @@ static const unsigned char pat_start[] = {
     0x84, 0x01, 0x00, 3,
     0, 0, 0, 0
 };
+/* Tank shell "blit": one tick (50 ms) of the lowest tone the chip has
+ * (N=1023, about 109 Hz) at attenuation 11 of 15, roughly a quarter of the
+ * level the other effects play at. */
+static const unsigned char pat_tank_fire[] = {
+    0xFF, 0x03, 0x0B, 1,
+    0, 0, 0, 0
+};
 static const unsigned char pat_alien[] = {
     0x04, 0x00, 0x02, 1,        /* short crackle */
     0, 0, 0, 0
@@ -98,6 +105,13 @@ static const unsigned char pat_boom[] = {
     0x04, 0x00, 0x00, 2,
     0x04, 0x00, 0x05, 2,
     0x04, 0x00, 0x0A, 2,
+    0, 0, 0, 0
+};
+/* Shell into the dirt: two ticks of the slow periodic noise (ctrl 2,
+ * clock/1024), quiet and fading. */
+static const unsigned char pat_tank_hit[] = {
+    0x02, 0x00, 0x0B, 1,
+    0x02, 0x00, 0x0D, 1,
     0, 0, 0, 0
 };
 static const unsigned char pat_house[] = {
@@ -234,6 +248,36 @@ static void play_tone_pat(unsigned char owner, const unsigned char *pat)
     voice_pat[v] = pat;
     voice_off[v] = 0;
     load_tone_step(v);
+}
+
+/* Low-priority variants for sounds that repeat a lot: only play on a free
+ * voice (or an idle noise channel); never steal from a sound already
+ * playing, and never retrigger themselves. */
+static void play_tone_pat_free(unsigned char owner, const unsigned char *pat)
+{
+    unsigned char v;
+
+    if (!snd_on || death_att <= 15U)
+        return;
+    for (v = 0; v < 3U; v++) {
+        if (voice_owner[v] == 0) {
+            voice_owner[v] = owner;
+            voice_pat[v] = pat;
+            voice_off[v] = 0;
+            load_tone_step(v);
+            return;
+        }
+    }
+}
+
+static void play_noise_pat_free(unsigned char owner, const unsigned char *pat)
+{
+    if (!snd_on || death_att <= 15U || noise_owner != 0)
+        return;
+    noise_owner = owner;
+    noise_pat = pat;
+    noise_off = 0;
+    load_noise_step();
 }
 
 static void play_noise_pat(unsigned char owner, const unsigned char *pat)
@@ -373,6 +417,12 @@ void snd_play(unsigned char id)
         break;
     case SND_ALIEN:
         play_tone_pat(id, pat_alien);
+        break;
+    case SND_TANK_FIRE:
+        play_tone_pat_free(id, pat_tank_fire);
+        break;
+    case SND_TANK_HIT:
+        play_noise_pat_free(id, pat_tank_hit);
         break;
     case SND_SHELL:
         play_noise_pat(id, pat_shell);

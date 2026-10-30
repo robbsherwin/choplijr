@@ -4144,9 +4144,8 @@ static void check_bullet(int ei)
     }
 }
 
-/* Kept for when tank shells are unmuted: only play if some of the tank
- * overlaps the 160 px window. */
-#if 0
+/* Only a tank with some part of it in the 160 px window makes a sound
+ * when it fires. */
 static int tank_on_screen(const entity_t *e)
 {
     int sx, w;
@@ -4162,7 +4161,6 @@ static int tank_on_screen(const entity_t *e)
         return 0;
     return 1;
 }
-#endif
 
 /* choplifter.s updateTankGoRight: do not walk up to FENCE_X.  Same-page
  * keep-out is $C0 + ~(GROUND<<3), ~95-151 world px by plane. */
@@ -4217,9 +4215,10 @@ static int fire_tank_shell(int ti)
     s->vx = (signed char)(shell_launch_vx[ang] + t->vy);
     s->vy = 3;
     s->dir = (signed char)shell_launch_dir[ang];
-    /* Tank shells muted: off-screen fire was jarring.  Restore later. */
-    /* if (tank_on_screen(t))
-        snd_play(SND_SHELL); */
+    /* A short, low, quiet blip (SND_TANK_FIRE, snd.c); off-screen tanks
+     * stay silent, which is what made the old SND_SHELL jarring. */
+    if (tank_on_screen(t))
+        snd_play(SND_TANK_FIRE);
     return si;
 }
 
@@ -4693,6 +4692,15 @@ static void update_shell(int i)
             chopper_hit(i);
         }
         return;
+    }
+    /* Dirt thud for a tank shell landing on screen (quiet, snd.c).  Checked
+     * before init_explosion rewrites the type; saucer shots share this
+     * update and stay silent. */
+    if (e->type == ET_SHELL) {
+        int sx = world_to_sx(e->x);
+
+        if (sx > -(int)SHELL_PX && sx < (int)M8_WIDTH_PX)
+            snd_play(SND_TANK_HIT);
     }
     e->y = 0;
     e->ground = (unsigned char)chop_ground;
