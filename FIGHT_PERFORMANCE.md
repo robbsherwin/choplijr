@@ -7,6 +7,40 @@ every figure marked *analysis* is derived from 8088 timings and the M10
 hardware logs, not measured. The combat-window capture in `docs/TIMINGS.md`
 (`M10-05.LOG`) is the measurement this leans on.
 
+## Status (2026-10-30)
+
+Implemented and merged through pull requests #26 to #31. None of it has been
+built with Open Watcom or run on hardware: each change passed a gcc syntax
+check (and nasm 2.16 for the assembly) only. Every expected gain below is
+still analysis.
+
+| Item | Outcome | PR |
+|---|---|---|
+| 1 Skip overrun idle waits | Done. New `pit_mode2` / `pit_mode3` / `pit_now` in `pztimer.asm`; the loop measures retraces used and waits out only the rest. Attended runs are now unbounded (the old 0xFFFF cap would have ended a game after 18 minutes of real time). The optional "flip without waiting" variant was not done: it trades tearing for half a frame and wants a by-eye call | #26 |
+| 2 Table-driven restore | Done. `row_pat[2][200]`; `restore_rect()` is one `fill_rows_m8` call; replaces `sky_pat_tab`, `sky_rowpat`, `sky_grad_fill` | #27 |
+| 3 Retained sprites | **Not done.** Needs a record-then-draw pass (command buffer plus per-page keys, about 1.3 KB). That does not fit the DGROUP margin as estimated below without a far-segment design, and its failure mode (ghosts, wrong overlap order) can only be judged on screen. Revisit after measuring 1 and 2 | - |
+| 4 Pre-baked fire | Done at startup (`bake_fire_frames`), since the generator source art is not in the checkout; `blit_fire` removed; `fire_byte` matches `fire_tab` on all 256 inputs | #28 |
+| 5 Turret + cannon | Done. `tools/compose_tank.py` generates `src/sprdata_tank.c`. Also fixes a 2 px cannon wobble against the turret on odd tank x | #31 |
+| 6 Scenery hit list | Done. Rects ending above `SCENERY_TOP_ROW` (row 153, the flagpole) are dropped and the bbox recomputed over the rest | #30 |
+| 7 WORKSET as build option | Done. `-dWORKSET` in the makefile by default | #29 |
+| 8 Scroll-time sliver restore | **Not done.** Needs per-sprite opaque-core data from the sprite generator (source art not in the checkout); the document gates it on measuring 1 to 3 first | - |
+
+**DGROUP, by arithmetic, not from a map file:** this series adds about +464
+bytes (item 2: +800 table, -256 and -80 for the tables it replaced) and +336
+bytes (item 5), against the roughly 1.5 KB that byte-packing the dirty lists
+freed earlier (FIXES.md 2.4). Read the real figure from `build\m10.map`
+after the first build.
+
+**What to check first on hardware**, in a fight with `M10 /phases`:
+`idle` should fall toward zero (item 1); `restore` should drop well below its
+30% share of `present` (item 2); WORKSET byte counts should be unchanged
+except for fewer, slightly different tank rects (item 5). By eye: the tank
+cannon should sit still on the turret while the camera scrolls, explosions
+should look the same, and a long attended game should no longer stop by
+itself.
+
+The original analysis follows unchanged.
+
 ## What the hardware log already says
 
 `M10-05.LOG`, real PCjr, flown into a fight: 381 sim ticks in 927 BIOS ticks,
