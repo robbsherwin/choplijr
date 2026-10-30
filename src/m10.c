@@ -1835,6 +1835,24 @@ static const unsigned char *rle_skip_rows(const unsigned char *p, unsigned n)
     return p;
 }
 
+/* WORKSET byte counters (restore and blit bytes per present) are a build
+ * option: the makefile defines WORKSET so benchmark builds keep them, and
+ * a build without it drops the per-blit and per-restore 32-bit adds and
+ * the per-tick min/max bookkeeping (FIGHT_PERFORMANCE.md item 7).  The
+ * report itself always compiles; it says when the counters are absent. */
+#ifdef WORKSET
+#define WS_ADD_BLIT(n)      do { if (!opt_noworkset) ws_add_blit(n); } while (0)
+#define WS_ADD_RESTORE(b)   (ws_t_restore += (b))
+#define WS_BEGIN_TICK()     ws_begin_tick()
+#define WS_END_TICK(s)      ws_end_tick(s)
+#else
+#define WS_ADD_BLIT(n)      ((void)0)
+#define WS_ADD_RESTORE(b)   ((void)0)
+#define WS_BEGIN_TICK()     ((void)0)
+#define WS_END_TICK(s)      ((void)0)
+#endif
+
+#ifdef WORKSET
 /* Opaque + mixed bytes in `rows` RLE rows starting at p (a row start, not
  * the sprite header).  Only the clipped fallback still needs this; the
  * fast blitters return the same count as a side effect of the blit. */
@@ -1857,6 +1875,7 @@ static unsigned rle_run_bytes(const unsigned char *p, unsigned rows)
     }
     return n;
 }
+#endif /* WORKSET */
 
 /* A round-robin byte-count cache here (attempted this session) reliably
  * crashed on real DOSBox-X: DGROUP was already at 65408/65536 bytes before
@@ -1867,6 +1886,7 @@ static unsigned rle_run_bytes(const unsigned char *p, unsigned rows)
  * removing the arrays and the function did. Do not re-add without first
  * bringing DGROUP margin back to at least several hundred bytes. */
 
+#ifdef WORKSET
 static void ws_add_blit(unsigned n)
 {
     if (n == 0U)
@@ -1878,6 +1898,8 @@ static void ws_add_blit(unsigned n)
     else
         ws_t_sprite += n;
 }
+
+#endif /* WORKSET */
 
 static void ws_reset(void)
 {
@@ -1892,6 +1914,7 @@ static void ws_reset(void)
     ws_dirty_dropped = 0;
 }
 
+#ifdef WORKSET
 static void ws_begin_tick(void)
 {
     ws_t_restore = ws_t_mtn_fill = ws_t_mtn_blit = 0UL;
@@ -1927,6 +1950,7 @@ static void ws_end_tick(int scrolled)
     if (scrolled)
         ws_n_scroll++;
 }
+#endif /* WORKSET */
 
 static unsigned long ws_avg(unsigned long sum, unsigned n)
 {
@@ -1960,6 +1984,11 @@ static void print_workset(void)
     unsigned long ar, ab, av, am, asce, asp;
     unsigned long us_r, us_b;
 
+#ifndef WORKSET
+    printf("\nWORKSET counters not built in (makefile CFLAGS -dWORKSET).\n");
+    if (ws_n == 0U)                     /* always: nothing ever counts */
+        return;
+#endif
     printf("\nWORKSET byte counts (every sim present this run).  Not times.\n");
     if (ws_n == 0U) {
         printf("  no sim presents.\n");
@@ -2040,7 +2069,7 @@ static void restore_rect(unsigned seg, const dirty_rect *d)
 
     if (y1 <= y)
         return;
-    ws_t_restore += (unsigned long)rw * (unsigned long)(y1 - y);
+    WS_ADD_RESTORE((unsigned long)rw * (unsigned long)(y1 - y));
     if (!row_pat_ready)
         row_pat_init();
     fill_rows_m8(seg, xb, y, rw, y1 - y, &row_pat[xb & 1U][y]);
@@ -2338,12 +2367,11 @@ static void blit_at(unsigned seg, int x_px, int y,
         else
             n = blit_rle_m8_rows(seg, (unsigned)xbyte0, (unsigned)y,
                                  dgroup_seg, (unsigned)p, (unsigned)rows);
-        if (!opt_noworkset)
-            ws_add_blit(n);
+        WS_ADD_BLIT(n);
+        (void)n;
     } else {
         /* Rare edge-of-screen path; still needs its own count. */
-        if (!opt_noworkset)
-            ws_add_blit(rle_run_bytes(p, (unsigned)rows));
+        WS_ADD_BLIT(rle_run_bytes(p, (unsigned)rows));
         blit_rle_clip(seg, x_px, y, p, (unsigned)rows);
     }
 
@@ -6168,7 +6196,7 @@ static void run_viewer(void)
                                          * checkpoints for the sub-phases. */
             }
             scrolled = (scroll_x != prev_scroll);
-            ws_begin_tick();
+            WS_BEGIN_TICK();
 
             /* Sample after both pages have a dirty list.  Wait retrace first
              * so the Zen window sees the same VGA phase as M1.  Do not touch
@@ -6293,7 +6321,7 @@ static void run_viewer(void)
             }
 
             draw_hud(back_seg, back);
-            ws_end_tick(scrolled);
+            WS_END_TICK(scrolled);
 
             if (opt_phases) {
                 tp0 = bios_ticks();

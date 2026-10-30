@@ -100,7 +100,10 @@ M10     = $(BUILD)\m10.exe
 #        barracks).  Remove it for a release build; the F1/` debug HUD and
 #        the /force* switches stay either way, they are harmless to a
 #        player who does not ask for them.
-CFLAGS  = -0 -ms -ot -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND) -dDEBUG_KEYS
+# -dWORKSET     keep the WORKSET byte counters (restore/blit bytes per
+#        present, printed after a flight).  The pad benchmark depends on
+#        them; a build without it skips their per-blit cost.
+CFLAGS  = -0 -ms -ot -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND) -dDEBUG_KEYS -dWORKSET
 
 # -f obj is the OMF object format wlink reads directly (DESIGN.md section 12).
 # Listings are kept because the assembly here has to be verified by reading,
