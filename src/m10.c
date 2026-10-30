@@ -234,6 +234,12 @@ static unsigned long    ws_z_restore, ws_z_blit, ws_z_video;
 #define SILL_WORLD_Y    25U
 #define BASE_BUILD_Y    34U
 #define FLAGPOLE_Y      46U
+/* Topmost screen row any scenery part occupies: the flagpole and flag,
+ * drawn with their top at world_to_sy(FLAGPOLE_Y).  Houses start at row
+ * 163, flames at 159, fence and pad lower still.  A sprite rect ending
+ * above this row cannot touch scenery.  Keep it in step if anything
+ * taller is added to draw_scenery(). */
+#define SCENERY_TOP_ROW (199U - FLAGPOLE_Y)
 #define BOUNDS_TOP      112U
 #define LAND_POSY       25U
 /* Tread bottom = LAND_POSY + GROUND - this.  8 sat them on the
@@ -6176,6 +6182,9 @@ static void run_viewer(void)
                                          * rects, shared by the moon check
                                          * and the scenery hit-tests */
             const dirty_bbox *hbbp;
+            dirty_bbox        sbb;      /* same, scenery subset only */
+            const dirty_bbox *sbbp;
+            unsigned          sc_n, k;  /* rects that reach the scenery */
 
             t_iter0 = pit_now();
             back_seg = back ? seg_b : seg_a;
@@ -6216,6 +6225,28 @@ static void run_viewer(void)
             }
             restore_list(back_seg, &lists[back]);
             draw_stars_and_moon(back_seg, back, lists[back].r, old_n, hbbp);
+
+            /* Scenery hit list: only the rects that reach down to the
+             * scenery rows.  Jets, saucers, their shots and a high chopper
+             * end above SCENERY_TOP_ROW and could never match, but each
+             * one cost a test in every one of ~20 scenery probes on a
+             * static tick (FIGHT_PERFORMANCE.md item 6).  Compacted in
+             * place: restore_list has already run, the moon check above
+             * has used the full list, and nothing writes lists[back].r
+             * again until draw_ents below.  The bbox is recomputed over
+             * the subset, which also makes it tighter. */
+            sc_n = 0;
+            for (k = 0; k < old_n; k++) {
+                const dirty_rect *rk = &lists[back].r[k];
+
+                if ((unsigned)rk->y + (unsigned)rk->rows > SCENERY_TOP_ROW)
+                    lists[back].r[sc_n++] = *rk;
+            }
+            sbbp = 0;
+            if (sc_n != 0U) {
+                dirty_bbox_calc(&sbb, lists[back].r, sc_n);
+                sbbp = &sbb;
+            }
 
             full_sc = scrolled || scenery_full[back];
             if (full_sc) {
@@ -6286,7 +6317,7 @@ static void run_viewer(void)
                  * means the next full_sc pass's restore_list will erase it
                  * before redrawing, closing that gap. */
                 draw_scenery(back_seg, sim_frame, &scenery_mark[back], 0,
-                             lists[back].r, old_n, hbbp, (unsigned)back);
+                             lists[back].r, sc_n, sbbp, (unsigned)back);
             }
 
             if (opt_phases) {
