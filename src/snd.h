@@ -23,6 +23,11 @@
 #define SND_BOOM        10
 #define SND_HOUSE       11
 #define SND_ALIEN       12
+/* Tank shell leaving the barrel and landing in the dirt.  Short, low and
+ * quiet next to everything else: these fire about twice a second in a
+ * fight.  Both only play if a voice is free, never stealing one. */
+#define SND_TANK_FIRE   13
+#define SND_TANK_HIT    14
 
 void snd_init(void);
 void snd_silence(void);
