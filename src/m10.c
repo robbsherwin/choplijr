@@ -491,10 +491,17 @@ static dirty_list        scenery_mark[2] = {
  * scenery_mark means that restore touches nothing else: the intact
  * houses, fence and base stay put.  One rect per burning house per
  * visit, plus a visit's worth of duplicates between flips. */
-#define FLAME_MAX       12
-static dirty_rect        flame_r[2][FLAME_MAX];
-static dirty_list        flame_mark[2] = {
-    { 0, FLAME_MAX, flame_r[0] }, { 0, FLAME_MAX, flame_r[1] }
+/* ... and the base flag, whose two frames also differ in outline (one
+ * frame's pixels survive under the other).  Before FIXES.md 1.2 the fire
+ * flip restored the whole scenery list, which cleaned the flag up as a
+ * side effect; once only the flames were restored the flag kept both
+ * frames' pixels, seen on hardware as a flickering base.  Everything
+ * animated in the scenery goes here, and the list is restored whenever
+ * either animation changes frame on this page. */
+#define ANIM_MAX        16
+static dirty_rect        anim_r[2][ANIM_MAX];
+static dirty_list        anim_mark[2] = {
+    { 0, ANIM_MAX, anim_r[0] }, { 0, ANIM_MAX, anim_r[1] }
 };
 static unsigned char    chop_loaded;
 static unsigned char    curr_level;
@@ -5433,7 +5440,7 @@ static void next_sortie(void)
     paint_world(seg_b);
     lists[0].n = lists[1].n = 0;
     scenery_mark[0].n = scenery_mark[1].n = 0;
-    flame_mark[0].n = flame_mark[1].n = 0;
+    anim_mark[0].n = anim_mark[1].n = 0;
     scenery_invalidate();          /* forces a full houses/fence/base redraw
                                      * next present, onto the wiped
                                      * background above -- without this,
@@ -5536,7 +5543,7 @@ static void blit_world(unsigned seg, unsigned wx, unsigned wy,
  * removing the retile left nothing else to fix here. */
 
 /* list: scenery_mark[pg], where the house bodies, sills and debris are
- * tracked for the scroll restore.  flist: flame_mark[pg], where only the
+ * tracked for the scroll restore.  flist: anim_mark[pg], where only the
  * flame overlay goes, so the fire-flip restore in run_viewer() erases the
  * flames and nothing else.  The flame's bottom row overlaps the body's top
  * row, so a flip redraws all three blits of a burning house. */
@@ -5678,11 +5685,11 @@ static int pad_hits_dirty(const dirty_rect *hit, unsigned nhit,
 /* The fire-flip restore used to run over the whole of scenery_mark, which
  * erased the pad, base and fence along with the flames and so forced a
  * fire_changed redraw of all of them every 4 ticks; the flames now live in
- * flame_mark, so nothing here is ever erased by a flip and the only
+ * anim_mark, so nothing here is ever erased by a flip and the only
  * animation this needs to track is the flag's own. */
 static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
-                      int full, const dirty_rect *hit, unsigned nhit,
-                      const dirty_bbox *bb, unsigned pg)
+                      dirty_list *alist, int full, const dirty_rect *hit,
+                      unsigned nhit, const dirty_bbox *bb, unsigned pg)
 {
     unsigned bx = BASE_X + 0x49U;
     unsigned px = BASE_X + 0x71U;
@@ -5697,25 +5704,31 @@ static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
                           base_building_e, hit, nhit, bb))
         blit_world(seg, bx, BASE_BUILD_Y, base_building_e, base_building_o,
                    list);
-    if (full
+    /* The flag's tracked rect is a whole byte wider than the flag and
+     * takes the pole's column with it, so a flag-frame restore erases the
+     * pole too: redraw the pole whenever the flag changes. */
+    flag_bit = (unsigned char)((frame / 8U) & 1U);
+    flag_changed = (unsigned char)(flag_bit != last_flag_bit[pg]);
+    last_flag_bit[pg] = flag_bit;
+    if (full || flag_changed
         || spr_hits_dirty(world_to_sx(px), world_to_sy(FLAGPOLE_Y),
                           base_flagpole_e, hit, nhit, bb))
         blit_world(seg, px, FLAGPOLE_Y, base_flagpole_e, base_flagpole_o,
                    list);
 
-    flag_bit = (unsigned char)((frame / 8U) & 1U);
-    flag_changed = (unsigned char)(flag_bit != last_flag_bit[pg]);
-    last_flag_bit[pg] = flag_bit;
+    /* The flag goes into alist (anim_mark), not the scenery list: run_viewer
+     * restores that list when the flag bit flips for this page, so the
+     * other frame's pixels are gone before this one is drawn. */
     flag = flag_bit ? base_flag_01_e : base_flag_00_e;
     if (full || flag_changed
         || spr_hits_dirty(world_to_sx(px + 2U), world_to_sy(FLAGPOLE_Y),
                           flag, hit, nhit, bb)) {
         if (flag_bit)
             blit_world(seg, px + 2U, FLAGPOLE_Y, base_flag_01_e,
-                       base_flag_01_o, list);
+                       base_flag_01_o, alist);
         else
             blit_world(seg, px + 2U, FLAGPOLE_Y, base_flag_00_e,
-                       base_flag_00_o, list);
+                       base_flag_00_o, alist);
     }
 }
 
@@ -5732,14 +5745,14 @@ static void draw_scenery(unsigned seg, unsigned frame, dirty_list *list,
         bbp = 0;
     /* run_viewer's fire-flip gate compares sim_frame the same way against
      * this same last_fire_bit[pg] *before* calling here, to decide whether
-     * to restore flame_mark[pg] ahead of this redraw. */
+     * to restore anim_mark[pg] ahead of this redraw. */
     fire_bit = (unsigned char)((frame / 4U) & 1U);
     fire_changed = (unsigned char)(fire_bit != last_fire_bit[pg]);
     last_fire_bit[pg] = fire_bit;
-    draw_houses(seg, list, &flame_mark[pg], full, hit, nhit, bbp, fire_bit,
+    draw_houses(seg, list, &anim_mark[pg], full, hit, nhit, bbp, fire_bit,
                 fire_changed);
     draw_fence(seg, list, full, hit, nhit, bbp);
-    draw_base(seg, frame, list, full, hit, nhit, bbp, pg);
+    draw_base(seg, frame, list, &anim_mark[pg], full, hit, nhit, bbp, pg);
     ws_kind = WS_K_SPRITE;
 }
 
@@ -6107,8 +6120,8 @@ static void run_viewer(void)
     lists[1].n = 0;
     scenery_mark[0].n = 0;
     scenery_mark[1].n = 0;
-    flame_mark[0].n = 0;
-    flame_mark[1].n = 0;
+    anim_mark[0].n = 0;
+    anim_mark[1].n = 0;
     scenery_invalidate();
     last_flag_bit[0] = last_flag_bit[1] = 0xFF;
     last_fire_bit[0] = last_fire_bit[1] = 0xFF;
@@ -6266,25 +6279,30 @@ static void run_viewer(void)
             full_sc = scrolled || scenery_full[back];
             if (full_sc) {
                 restore_list(back_seg, &scenery_mark[back]);
-                restore_list(back_seg, &flame_mark[back]);
-            } else if (flame_mark[back].n != 0U) {
+                restore_list(back_seg, &anim_mark[back]);
+            } else if (anim_mark[back].n != 0U) {
                 /* A burning house's flame frame changes every 4 sim ticks
                  * (draw_houses' fire_bit) whether or not the camera moves,
                  * and house_fire_00_e/_01_e do not share an opaque
                  * silhouette, so the old frame has to be restored before
                  * the new one is drawn.  Only the flame rects are restored
-                 * here (flame_mark, not scenery_mark): the earlier version
+                 * here (anim_mark, not scenery_mark): the earlier version
                  * restored the whole scenery list, which erased the intact
                  * houses, fence and base too, redrew the fence and base
                  * every 4 ticks for the whole game, and left the intact
                  * houses erased until the next scroll (FIXES.md 1.2).
-                 * flame_mark[back].n != 0 is also the "a burning house is
+                 * anim_mark[back].n != 0 is also the "a burning house is
                  * actually on this page" gate: an off-screen flame never
                  * gets a rect, so a far-away fire costs nothing here. */
                 unsigned char fb = (unsigned char)((sim_frame / 4U) & 1U);
+                unsigned char lb = (unsigned char)((sim_frame / 8U) & 1U);
 
-                if (fb != last_fire_bit[back])
-                    restore_list(back_seg, &flame_mark[back]);
+                /* Same test draw_scenery/draw_base make a moment later
+                 * (fire_changed / flag_changed), before they update the
+                 * per-page last_*_bit.  The flag's frames differ in
+                 * outline just as the flames' do. */
+                if (fb != last_fire_bit[back] || lb != last_flag_bit[back])
+                    restore_list(back_seg, &anim_mark[back]);
             }
 
             if (opt_phases) {
@@ -6318,20 +6336,18 @@ static void run_viewer(void)
                              0, 0U, 0, (unsigned)back);
                 scenery_full[back] = 0;
             } else {
-                /* full=0 so this only draws what hit-tests dirty or has an
-                 * animation-state change (fire_changed / flag_changed) --
-                 * but list must still be real, not 0: a redraw here isn't
-                 * preceded by a restore (that only happens on a full_sc
-                 * pass), so an animated sprite whose frames don't share the
-                 * same opaque silhouette (house_fire_00_e vs _01_e, e.g.)
-                 * can leave a stale pixel where the old frame was opaque
-                 * and the new one is transparent -- RLE transparency means
-                 * "don't touch dest", so that pixel is never overwritten.
-                 * Tracking the footprint here (in scenery_mark, not lists,
-                 * so this can never alias the hit list being iterated over)
-                 * means the next full_sc pass's restore_list will erase it
-                 * before redrawing, closing that gap. */
-                draw_scenery(back_seg, sim_frame, &scenery_mark[back], 0,
+                /* full=0: only what hit-tests dirty or changed animation
+                 * frame (fire_changed / flag_changed) is drawn.
+                 * list = 0: on a static-camera tick every scenery part
+                 * redrawn here is at the position scenery_mark already
+                 * holds from the last full draw, so recording it again
+                 * only duplicated rects -- the pad alone, redrawn every
+                 * visit under the parked chopper, filled the 96 slots in
+                 * about five seconds, after which "DIRTY LIST FULL" and a
+                 * burst of redundant restores on the next scroll.  The
+                 * animated parts (flames, flag) still track into
+                 * anim_mark through their own list argument. */
+                draw_scenery(back_seg, sim_frame, 0, 0,
                              lists[back].r, sc_n, sbbp, (unsigned)back);
             }
 
