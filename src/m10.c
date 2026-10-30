@@ -99,11 +99,11 @@ extern unsigned char *hostage_load_fo[2];
 
 extern unsigned char *jet_e[25];
 extern unsigned char *jet_fe[25];
-extern unsigned char *tank_cannon_e[5];
+extern unsigned char *tank_tc_e[5];     /* turret + cannon, sprdata_tank.c */
+extern signed char    tank_tc_ox[5];
 extern unsigned char *explosion_e[5];
 extern unsigned char *alien_e[4];
 extern unsigned char *house_fire_e[2];
-extern unsigned char  tank_turret_e[];
 extern unsigned char  house_burn_e[];
 extern unsigned char  house_debris_e[];
 extern unsigned char  chop_rubble_e[];
@@ -2585,7 +2585,13 @@ static const unsigned char tank_spawn_rate[4] = { 1, 2, 2, 2 };
 static const unsigned char jet_spawn_rate[4]  = { 0, 1, 2, 2 };
 static const unsigned char alien_spawn_rate[4] = { 0, 0, 1, 2 };
 static const unsigned char jet_difficulty[4] = { 0, 0, 0x2C, 0x44 };
-static const unsigned char cannon_angle_x[5] = { 0x0B, 0x07, 0x01, 0xFF, 0xFB };
+/* Cannon x offsets from the original's cannonAngleOffsets.  No longer read
+ * at run time: tools/compose_tank.py reads this line to lay out the
+ * turret + cannon composites in sprdata_tank.c.  Kept here, as a comment,
+ * so the source of those offsets stays next to the tank code:
+ *
+ * cannon_angle_x[5] = { 0x0B, 0x07, 0x01, 0xFF, 0xFB }
+ */
 static const unsigned char tank_aim_table[6] = { 0x00, 0x40, 0x70, 0x90, 0xC0, 0xFF };
 static const unsigned char shell_launch_x[5] = { 0x00, 0x06, 0x10, 0x19, 0x1F };
 static const signed char   shell_launch_vx[5] = { -12, -7, 0, 7, 12 };
@@ -4846,7 +4852,6 @@ static void draw_ents(unsigned seg, dirty_list *list)
                 sy = world_to_sy(wy);
             fi = (e->x & 4U) ? 0 : 1;
             blit_aligned(seg, sx, sy, tank_tread_m9[fi], list);
-            blit_aligned(seg, sx + 4, sy - 3, tank_turret_e, list);
             fi = (int)(unsigned char)e->dir;
             if (fi > 4)
                 fi = 4;
@@ -4869,9 +4874,19 @@ static void draw_ents(unsigned seg, dirty_list *list)
              * (4-fi) leaves dir/tank_aim_table/shell_launch_* untouched
              * and just picks the mirror-image entry from those two visual
              * tables, so the sprite/offset pairing itself is unchanged --
-             * only which dir value selects which one. */
-            blit_aligned(seg, sx + (signed char)cannon_angle_x[4 - fi],
-                         sy - 7, tank_cannon_e[4 - fi], list);
+             * only which dir value selects which one.
+             *
+             * Turret and cannon are one composite sprite per angle
+             * (tools/compose_tank.py -> sprdata_tank.c): one blit, one
+             * dirty rect and one restore fewer per tank per present
+             * (FIGHT_PERFORMANCE.md item 5).  The composite is laid out
+             * from cannon_angle_x and the old +4 turret offset as they drew
+             * on an even tank x; on an odd x the separately-aligned cannon
+             * used to jump 2 px against the turret, and no longer does.
+             * ox is even, so blit_aligned's rounding keeps the turret on
+             * the treads exactly as before. */
+            blit_aligned(seg, sx + (int)tank_tc_ox[4 - fi], sy - 7,
+                         tank_tc_e[4 - fi], list);
         } else if (e->type == ET_JET) {
             fi = jet_sprite_frame(e);
             spr = (e->dir < 0) ? jet_fe[fi] : jet_e[fi];
