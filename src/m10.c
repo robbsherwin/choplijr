@@ -147,11 +147,13 @@ static int      opt_forceclip   = 0;        /* debug: every blit_at takes
                                               * Not a real mode -- isolates the
                                               * fast-vs-slow blit path cost. */
 static int      opt_forcefire   = 0;        /* debug: every in-bounds blit_at
-                                              * takes blit_rle_m8_fire, as if
-                                              * blit_fire were set, without
-                                              * touching real game state.
-                                              * Not a real mode -- isolates
-                                              * the fire-remap fast path. */
+                                              * takes blit_rle_m8_fire,
+                                              * without touching real game
+                                              * state.  Not a real mode --
+                                              * isolates the fire-remap
+                                              * path's cost.  Explosions
+                                              * are already baked, so they
+                                              * recolour twice here. */
 static int      opt_noworkset   = 0;        /* debug: skip ws_add_blit's
                                               * rle_run_bytes() re-parse of
                                               * every blitted sprite -- pure
@@ -442,7 +444,6 @@ static int              stick_source;   /* 0 none, 1 port201, 2 int15 */
 static unsigned char    stick_seen_live;        /* a live sample ever arrived */
 static unsigned char    stick_dead_run;         /* consecutive dead probes */
 static unsigned char    stick_skip;             /* ticks left before re-probe */
-static unsigned char    blit_fire;              /* remap yellow 14 -> fire */
 static unsigned char    snd_did_board, snd_did_kill, snd_did_boom;
 static unsigned         dbg_xmin, dbg_xmax, dbg_ymin, dbg_ymax;
 static unsigned         dbg_x, dbg_y;
@@ -2157,13 +2158,55 @@ static unsigned char fire_nibble(unsigned char n, unsigned mix)
     return c[mix % 3U];
 }
 
+/* The yellow-to-fire recolour, with the old blit_fire phase fixed at 1 (the
+ * only value it was ever used with).  blit.asm's fire_tab is this function
+ * tabulated. */
 static unsigned char fire_byte(unsigned char src)
 {
     unsigned mix;
 
-    mix = (unsigned)src + (unsigned)blit_fire;
+    mix = (unsigned)src + 1U;
     return (unsigned char)((fire_nibble((unsigned char)(src >> 4), mix) << 4) |
                            fire_nibble((unsigned char)(src & 0x0F), mix + 1U));
+}
+
+/* Recolour the explosion frames once, at startup, instead of on every blit
+ * (FIGHT_PERFORMANCE.md item 4).  Explosions and the dying chopper used to
+ * go through blit_rle_m8_fire, whose opaque runs are LODSB/XLATB/STOSB/LOOP
+ * per byte instead of REP MOVSB, because the recolour was applied at draw
+ * time; it is a fixed function of the sprite bytes, so it can be applied
+ * to the data once.  Only run payload bytes are touched, never the header
+ * or the skip/run pairs, and the recolour never turns a zero nibble
+ * non-zero or back, so the RLE structure is unchanged.  Frames that appear
+ * twice in the table are baked once (the recolour is not idempotent). */
+static void bake_fire_frames(void)
+{
+    unsigned       f, g, r, rows, skip, run;
+    unsigned char *p;
+
+    for (f = 0; f < 5U; f++) {
+        for (g = 0; g < f; g++)
+            if (explosion_e[g] == explosion_e[f])
+                break;
+        if (g != f)
+            continue;
+        p = explosion_e[f];
+        rows = p[1];
+        p += 2;
+        for (r = 0; r < rows; r++) {
+            for (;;) {
+                skip = *p++;
+                run  = *p++;
+                if (skip == 0U && run == 0U)
+                    break;
+                while (run != 0U) {
+                    *p = fire_byte(*p);
+                    p++;
+                    run--;
+                }
+            }
+        }
+    }
 }
 
 /* Called once per opaque/mixed byte on the clipped blit fallback's row walk
@@ -2180,8 +2223,6 @@ static void plot_m8_byte(unsigned seg, unsigned off, unsigned char src)
 {
     unsigned char d;
 
-    if (blit_fire)
-        src = fire_byte(src);
     if (src == 0)
         return;
     if ((src & 0x0F) != 0 && (src & 0xF0) != 0) {
@@ -2290,7 +2331,7 @@ static void blit_at(unsigned seg, int x_px, int y,
          * second C-side pass over the same RLE stream needed here. */
         unsigned n;
 
-        if (blit_fire || opt_forcefire)
+        if (opt_forcefire)
             n = blit_rle_m8_fire_rows(seg, (unsigned)xbyte0, (unsigned)y,
                                       dgroup_seg, (unsigned)p,
                                       (unsigned)rows);
@@ -4837,11 +4878,10 @@ static void draw_ents(unsigned seg, dirty_list *list)
             if (eh == 0U)
                 eh = 1U;
             sy = world_to_sy((unsigned)e->y + (unsigned)e->ground + eh - 1U);
-            blit_fire = 1;
+            /* Frames are pre-recoloured (bake_fire_frames): plain blit. */
             blit_aligned(seg, sx, sy, explosion_e[fi], list);
             if (e->type == ET_WRECK && fi >= 3)
                 blit_aligned(seg, sx, sy, chop_rubble_e, list);
-            blit_fire = 0;
         }
     }
     if (dying) {
@@ -4857,7 +4897,6 @@ static void draw_ents(unsigned seg, dirty_list *list)
             wy -= sink_y;
         sy = world_to_sy(wy + eh - 1U);
         sx = world_to_sx(chop_x);
-        blit_fire = 1;
         for (k = 0; k < 3; k++) {
             dx = (k - 1) * 10;
             blit_aligned(seg, sx + dx, sy - ((k * 3) & 3),
@@ -4865,7 +4904,6 @@ static void draw_ents(unsigned seg, dirty_list *list)
             if (++fi2 >= 5)             /* (boom_phase + k) % 5 */
                 fi2 = 0;
         }
-        blit_fire = 0;
     }
 }
 
@@ -6648,6 +6686,7 @@ int main(int argc, char **argv)
 
     setbuf(stdout, NULL);
     dgroup_seg = data_seg();            /* once, not per blit */
+    bake_fire_frames();
 
     if (!parse_args(argc, argv))
         return 1;
