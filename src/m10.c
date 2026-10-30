@@ -1140,7 +1140,7 @@ static unsigned sky_grad_find_idx(unsigned y)
 }
 
 /* 0 = all top colour, 16 = all bottom colour (every Bayer cell is < 16).
- * Used only by sky_pat_init below, once per row, not per present. */
+ * Used only by row_pat_init below, once per row, not per present. */
 static unsigned sky_grad_mix(const sky_gradient *g, unsigned y)
 {
     unsigned span;
@@ -1167,18 +1167,6 @@ static unsigned char sky_grad_byte(const sky_gradient *g, unsigned xbyte,
     return (unsigned char)((l << 4) | (r & 0x0FU));
 }
 
-/* sky_grad_byte(g, xbyte, y) depends on xbyte only through its parity (the
- * 4x4 Bayer cell is two bytes wide), so a row has exactly two possible fill
- * words for a given (gradient, y): one starting on an even byte column, one
- * on odd.  restore_rect can re-enter the same row many times a present (once
- * per dirty rect that touches it), and every entry used to redo a 16-bit
- * multiply and divide (sky_grad_mix) twice -- once per nibble-pair -- to
- * regenerate a value that depends on nothing but y.  Precompute both words
- * for every row of both bands once (self-triggering on first use) into
- * sky_pat_tab, and turn the per-row cost into a table lookup. */
-static unsigned sky_pat_tab[SKY_GRAD_N][SKY_GRAD_MAXROWS][2];
-static unsigned char sky_pat_ready = 0;
-
 static unsigned sky_grad_pattern_calc(const sky_gradient *g, unsigned xbyte,
                                       unsigned y)
 {
@@ -1186,58 +1174,48 @@ static unsigned sky_grad_pattern_calc(const sky_gradient *g, unsigned xbyte,
            | (unsigned)sky_grad_byte(g, xbyte, y);
 }
 
-static void sky_pat_init(void)
-{
-    unsigned gi, row, n, y;
-    const sky_gradient *g;
+static unsigned band_solid(unsigned y);
 
-    for (gi = 0; gi < SKY_GRAD_N; gi++) {
-        g = &sky_grads[gi];
-        n = (unsigned)g->y1 - (unsigned)g->y0;
-        if (n > SKY_GRAD_MAXROWS)
-            n = SKY_GRAD_MAXROWS;       /* cannot happen; guards the table */
-        for (row = 0; row < n; row++) {
-            y = (unsigned)g->y0 + row;
-            sky_pat_tab[gi][row][0] = sky_grad_pattern_calc(g, 0U, y);
-            sky_pat_tab[gi][row][1] = sky_grad_pattern_calc(g, 1U, y);
+/* The background fill word for every scanline, for a rect starting on an
+ * even byte column ([0]) and an odd one ([1]).  The background is a
+ * function of screen row only, except that the sky dither's 4x4 Bayer cell
+ * is two bytes wide, so the gradient rows depend on the column's parity
+ * too -- hence two tables.  Built once from band_solid() and the gradient
+ * maths; paint_world() and restore_rect() then hand a slice of it straight
+ * to fill_rows_m8, one assembly call per rect.
+ *
+ * restore_rect() used to classify every row of every rect in C (a call to
+ * sky_grad_find_idx and one to band_solid per row, then one fill call per
+ * band segment): a ground sprite crossed up to five bands, and a tank
+ * fight restores 300-400 rows a present (FIGHT_PERFORMANCE.md item 2).
+ * This replaces sky_pat_tab, sky_rowpat and sky_grad_fill.  800 bytes. */
+static unsigned row_pat[2][M8_HEIGHT_PX];
+static unsigned char row_pat_ready = 0;
+
+static void row_pat_init(void)
+{
+    unsigned y, gi;
+
+    for (y = 0; y < M8_HEIGHT_PX; y++) {
+        gi = sky_grad_find_idx(y);
+        if (gi < SKY_GRAD_N) {
+            row_pat[0][y] = sky_grad_pattern_calc(&sky_grads[gi], 0U, y);
+            row_pat[1][y] = sky_grad_pattern_calc(&sky_grads[gi], 1U, y);
+        } else {
+            row_pat[0][y] = row_pat[1][y] = band_solid(y);
         }
     }
-    sky_pat_ready = 1;
-}
-
-static unsigned sky_grad_pattern(unsigned gi, unsigned xbyte, unsigned y)
-{
-    if (!sky_pat_ready)
-        sky_pat_init();
-    return sky_pat_tab[gi][y - (unsigned)sky_grads[gi].y0][xbyte & 1U];
-}
-
-#define SKY_PAT_MAX     40
-static unsigned sky_rowpat[SKY_PAT_MAX];
-
-static void sky_grad_fill(unsigned seg, unsigned gi, unsigned xbyte,
-                          unsigned y, unsigned wbytes, unsigned rows)
-{
-    unsigned i, n, off;
-
-    off = 0;
-    while (off < rows) {
-        n = rows - off;
-        if (n > SKY_PAT_MAX)
-            n = SKY_PAT_MAX;
-        for (i = 0; i < n; i++)
-            sky_rowpat[i] = sky_grad_pattern(gi, xbyte, y + off + i);
-        fill_rows_m8(seg, xbyte, y + off, wbytes, n, sky_rowpat);
-        off += n;
-    }
+    row_pat_ready = 1;
 }
 
 static void draw_sky_gradient(unsigned seg, unsigned gi)
 {
     const sky_gradient *g = &sky_grads[gi];
 
-    sky_grad_fill(seg, gi, 0U, (unsigned)g->y0, M8_BYTES_PER_ROW,
-                  (unsigned)g->y1 - (unsigned)g->y0);
+    if (!row_pat_ready)
+        row_pat_init();
+    fill_rows_m8(seg, 0U, (unsigned)g->y0, M8_BYTES_PER_ROW,
+                 (unsigned)g->y1 - (unsigned)g->y0, &row_pat[0][g->y0]);
 }
 
 static void draw_stars_and_moon(unsigned seg, unsigned pg,
@@ -2040,7 +2018,7 @@ static void print_workset(void)
 
 static void restore_rect(unsigned seg, const dirty_rect *d)
 {
-    unsigned y, y1, run_y, rw, xb, solid;
+    unsigned y, y1, rw, xb;
 
     /* fill_rect_m8 fills words: wbytes must be even.  An 18 px sprite is 9
      * packed bytes; passing 9 SHRs to 8 and leaves the last byte standing.
@@ -2059,28 +2037,12 @@ static void restore_rect(unsigned seg, const dirty_rect *d)
     if (y1 > M8_HEIGHT_PX)
         y1 = M8_HEIGHT_PX;
 
-    if (y1 > y)
-        ws_t_restore += (unsigned long)rw * (unsigned long)(y1 - y);
-
-    while (y < y1) {
-        unsigned gi = sky_grad_find_idx(y);
-
-        if (gi < SKY_GRAD_N) {
-            run_y = (unsigned)sky_grads[gi].y1;
-            if (run_y > y1)
-                run_y = y1;
-            sky_grad_fill(seg, gi, xb, y, rw, (unsigned)(run_y - y));
-            y = run_y;
-            continue;
-        }
-        solid = band_solid(y);
-        run_y = y + 1U;
-        while (run_y < y1 && sky_grad_find_idx(run_y) == SKY_GRAD_N
-               && band_solid(run_y) == solid)
-            run_y++;
-        fill_rect_m8(seg, xb, y, rw, (unsigned)(run_y - y), solid);
-        y = run_y;
-    }
+    if (y1 <= y)
+        return;
+    ws_t_restore += (unsigned long)rw * (unsigned long)(y1 - y);
+    if (!row_pat_ready)
+        row_pat_init();
+    fill_rows_m8(seg, xb, y, rw, y1 - y, &row_pat[xb & 1U][y]);
 }
 
 static void restore_list(unsigned seg, dirty_list *list)
