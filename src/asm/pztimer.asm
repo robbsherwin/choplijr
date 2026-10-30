@@ -268,3 +268,70 @@ ReferenceZTimerOff:
         pop     cx
         pop     ax
         ret
+
+;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+; Free-running clock for the game loop (FIGHT_PERFORMANCE.md item 1).
+;
+; void __cdecl pit_mode2(void)
+;   Timer 0 to mode 2 (rate generator), full 65536 divisor.  IRQ0 keeps its
+;   18.2 Hz rate, so the BIOS clock is unaffected, but the count now runs
+;   down by one per 838 ns instead of mode 3's by-two-twice-per-period, so
+;   a latched read is a position within the BIOS tick.  ztimer_on/off leave
+;   timer 0 in exactly this state already, and /ztimer has run on the real
+;   PCjr, so this is not new territory for the hardware.  Reloading the
+;   count costs the BIOS clock up to one tick, once.
+;
+; void __cdecl pit_mode3(void)
+;   Back to the BIOS default (mode 3, 65536).  Called from cleanup().
+;
+; unsigned long __cdecl pit_now(void)
+;   DX:AX = (BIOS tick low word << 16) | (65536 - timer 0 count): elapsed
+;   838 ns units, wrapping every 65536 BIOS ticks (an hour).  Differences
+;   taken modulo 2^32 are correct across that wrap.  The tick is read on
+;   both sides of the latch and the read retried if it moved, so a carry
+;   between the two halves cannot be torn.  Interrupts stay enabled: a
+;   pending IRQ0 must be able to land and bump the tick.
+;=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-;
+        global  _pit_mode2
+_pit_mode2:
+        mov     al,00110100b            ; ch 0, lsb+msb, mode 2, binary
+        out     MODE_8253,al
+        DELAY
+        sub     al,al
+        out     TIMER_0_8253,al         ; lsb
+        DELAY
+        out     TIMER_0_8253,al         ; msb: 0 = 65536
+        ret
+
+        global  _pit_mode3
+_pit_mode3:
+        mov     al,00110110b            ; ch 0, lsb+msb, mode 3, binary
+        out     MODE_8253,al
+        DELAY
+        sub     al,al
+        out     TIMER_0_8253,al
+        DELAY
+        out     TIMER_0_8253,al
+        ret
+
+        global  _pit_now
+_pit_now:
+        push    es
+        mov     ax,0x40
+        mov     es,ax
+.retry:
+        mov     bx,[es:0x6C]            ; BIOS tick, low word
+        mov     al,00000000b            ; latch timer 0
+        out     MODE_8253,al
+        DELAY
+        in      al,TIMER_0_8253         ; lsb
+        DELAY
+        mov     ah,al
+        in      al,TIMER_0_8253         ; msb
+        xchg    ah,al                   ; AX = remaining count
+        cmp     bx,[es:0x6C]
+        jne     .retry                  ; tick moved under us: read again
+        neg     ax                      ; 65536 - count; count 0 -> 0
+        mov     dx,bx
+        pop     es
+        ret
