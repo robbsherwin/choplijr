@@ -595,6 +595,7 @@ static void begin_death(void);
 static void cleanup(void)
 {
     snd_shutdown();
+    pit_mode3();                        /* run_viewer set mode 2 */
     if (kbd_hooked) {
         kbd_unhook();
         kbd_hooked = 0;
@@ -6041,6 +6042,8 @@ static void run_viewer(void)
     unsigned   back_seg;
     unsigned   i;
     unsigned   limit;
+    unsigned   idle_left;   /* idle retraces still owed before the next
+                             * sim tick; see the loop comment */
     int        in_combat = 0;  /* combat_tick_p() as of the last sim tick;
                                  * also read on the two idle retraces
                                  * between sim ticks, so cph_idle reflects
@@ -6090,17 +6093,29 @@ static void run_viewer(void)
     crt_page = page_b;
     set_pages(page_b, page_a);
 
-    limit = opt_frames;
-    if (limit == 0U)
-        limit = 0xFFFFU;
+    limit = opt_frames;                 /* 0 = attended: run until Esc */
 
+    pit_mode2();                        /* pit_now() needs mode 2 */
+    idle_left = 0;
     t0 = bios_ticks();
 
     /* i counts retraces, so /frames keeps its meaning.  Every pixel we draw
      * is a function of simulation state, so the two retraces between ticks
      * would redraw an identical scene into the other page: three times the
-     * video traffic for one visible update.  Draw on the tick only. */
-    for (i = 0; i < limit; i++) {
+     * video traffic for one visible update.  Draw on the tick only.
+     *
+     * A sim iteration measures how many retraces it actually took (sim +
+     * present + flip) and the loop only waits out what is left of the
+     * SIM_DIV budget.  It used to wait SIM_DIV - 1 more retraces whatever
+     * the iteration cost, so a 4-frame present in a tank fight became a
+     * 6-frame tick: a quarter of M10-05.LOG's combat window was that idle
+     * (FIGHT_PERFORMANCE.md item 1).  i advances by the retraces the
+     * iteration consumed, so it still counts real retraces.
+     *
+     * Attended runs (limit 0) are unbounded.  The old 0xFFFF retrace cap
+     * would now end an attended game after 18 minutes of real time; it
+     * only ever lasted longer because overrun ticks were undercounted. */
+    for (i = 0; limit == 0U || i < limit; i++) {
         {
             unsigned tog = 0;
 
@@ -6120,18 +6135,21 @@ static void run_viewer(void)
 #endif
         }
 
-        if ((i % SIM_DIV) == 0U) {
+        if (idle_left == 0U) {
             unsigned prev_scroll;
             unsigned old_n;
             int      scrolled;
             int      full_sc;
             int      do_z;
             unsigned long tp0, tp1, t_simend;
+            unsigned long t_iter0, t_iter;
+            unsigned      used;
             dirty_bbox        hbb;      /* bbox of this page's last sprite
                                          * rects, shared by the moon check
                                          * and the scenery hit-tests */
             const dirty_bbox *hbbp;
 
+            t_iter0 = pit_now();
             back_seg = back ? seg_b : seg_a;
             prev_scroll = scroll_x;
             if (opt_phases)
@@ -6302,9 +6320,27 @@ static void run_viewer(void)
             }
 
             back = !back;
+
+            /* Retraces this iteration used, rounded: the flip normally
+             * lands on the next field (1).  Clamped to 1..SIM_DIV; a huge
+             * value is the midnight BIOS-tick reset or a Zen-timer sample
+             * (which reloads this same counter), not a real overrun. */
+            t_iter = pit_now() - t_iter0;
+            used = 1U;
+            if (!do_z && t_iter < 30UL * PIT_PER_RETRACE) {
+                used = (unsigned)((t_iter + PIT_PER_RETRACE / 2UL)
+                                  / PIT_PER_RETRACE);
+                if (used < 1U)
+                    used = 1U;
+                if (used > SIM_DIV)
+                    used = SIM_DIV;
+            }
+            idle_left = SIM_DIV - used;
+            i += used - 1U;             /* the loop's i++ adds the last */
         } else {
             unsigned long ti0;
 
+            idle_left--;
             if (opt_phases)
                 ti0 = bios_ticks();
             vid_wait_retrace();

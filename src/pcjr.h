@@ -248,6 +248,18 @@ unsigned __cdecl ztimer_overflow(void);   /* nonzero => interval exceeded ~54 ms
 
 #define ZTIMER_NS_PER_TICK  838L          /* 1 / 1.193182 MHz = 838.1 ns */
 
+/* Free-running loop clock (same file).  pit_mode2() once before the game
+ * loop, pit_mode3() on the way out; pit_now() returns elapsed 838 ns units
+ * as (BIOS tick << 16) | position in tick.  Subtract two readings with
+ * unsigned long arithmetic.  /ztimer reprograms the same counter, so a
+ * reading that spans a Zen-timer sample is meaningless. */
+void          __cdecl pit_mode2(void);
+void          __cdecl pit_mode3(void);
+unsigned long __cdecl pit_now(void);
+
+/* One PCjr field in timer-0 units: 1,193,182 Hz / 59.92 Hz. */
+#define PIT_PER_RETRACE     19912UL
+
 /* --------------------------------------------------------- src/asm/dosmem.asm */
 
 unsigned __cdecl dos_get_psp(void);             /* int 21h AH=51h */
