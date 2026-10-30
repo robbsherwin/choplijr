@@ -43,10 +43,51 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <conio.h>
 
 #include "pcjr.h"
 #include "snd.h"
+
+/* Everything this program prints also goes to RUN_LOG_NAME in the current
+ * directory, overwritten each run, so the report that scrolls off a 25-line
+ * screen after a flight can be read afterwards.  Unbuffered: a buffered FILE
+ * would take 512 bytes from the near heap, which lives in the same 64 KB as
+ * DGROUP and has little to spare (CLAUDE-THOUGHTS.md).  Opened first thing
+ * in main(), closed in cleanup(); if it cannot be opened the screen output
+ * is unaffected. */
+#define RUN_LOG_NAME    "M10RUN.LOG"
+static FILE *run_log;
+
+static void log_printf(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    vfprintf(stdout, fmt, ap);
+    va_end(ap);
+    if (run_log != 0) {
+        va_start(ap, fmt);
+        vfprintf(run_log, fmt, ap);
+        va_end(ap);
+    }
+}
+#define printf log_printf
+
+static void run_log_open(void)
+{
+    run_log = fopen(RUN_LOG_NAME, "w");
+    if (run_log != 0)
+        setvbuf(run_log, NULL, _IONBF, 0);
+}
+
+static void run_log_close(void)
+{
+    if (run_log != 0) {
+        fclose(run_log);
+        run_log = 0;
+    }
+}
 
 extern unsigned char *chopper_side_e[11];
 extern unsigned char *chopper_side_o[11];
@@ -608,6 +649,7 @@ static void begin_death(void);
 
 static void cleanup(void)
 {
+    run_log_close();
     snd_shutdown();
     pit_mode3();                        /* run_viewer set mode 2 */
     if (kbd_hooked) {
@@ -6491,6 +6533,8 @@ static void usage(void)
 "               for tank+hostage ticks.  Off by default: real cost else.\n"
 "  /?           this\n"
 "\n"
+"Everything printed here is also written to M10RUN.LOG (overwritten).\n"
+"\n"
 "Stick: Paku Paku 1.6a port 201h loop (CLI, bits high, timeout 0FFFh).\n"
 "Joystick 1 only (first connector / Paku stick A, bits 0,1).  Analog\n"
 "mapped to the original Apple paddle tables.  Each side of rest is\n"
@@ -6785,9 +6829,12 @@ int main(int argc, char **argv)
     setbuf(stdout, NULL);
     dgroup_seg = data_seg();            /* once, not per blit */
     bake_fire_frames();
+    run_log_open();                     /* before the first printf */
 
-    if (!parse_args(argc, argv))
+    if (!parse_args(argc, argv)) {
+        run_log_close();
         return 1;
+    }
 
     printf("Choplifter! PCjr -- M10 polish\n");
     printf("hardware validation (workset bytes, /ztimer)  ground %s\n\n",
@@ -6799,6 +6846,7 @@ int main(int argc, char **argv)
     if (model != MODEL_PCJR && !opt_force) {
         printf("Refusing to run.  Pass /force on an emulator you do not mind "
                "crashing.\n");
+        run_log_close();
         return 3;
     }
     if (stick_force == 0 && model == MODEL_PCJR)
@@ -6968,6 +7016,8 @@ int main(int argc, char **argv)
            "/ztimer /batch /frames=60 and do not touch the keyboard during\n"
            "the sample.  Stick 1 analog and SN76496 (port 61h gate) are\n"
            "the rest of the hardware pass; see docs/M10.md.\n");
+    if (run_log != 0)
+        printf("This report was also written to %s.\n", RUN_LOG_NAME);
     cleanup();
     return 0;
 }
