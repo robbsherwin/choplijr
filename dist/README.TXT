@@ -1,12 +1,14 @@
-Choplifter! PCjr -- M10 test build, 2026-10-30 (evening)
-Built from main at be018bb with Open Watcom V2, -0 -ms -ot, DEBUG_KEYS
-and WORKSET on: the fight performance series (PRs #26-#31) plus the
-animated-scenery restore fix, tank shell sounds and the M10RUN.LOG copy
-of everything the program prints (PRs #34-#36).  Full checklist:
+Choplifter! PCjr -- M10 test build, 2026-10-30 (late)
+Built from main at d9b5c11 with Open Watcom V2, -0 -ms -ot, DEBUG_KEYS
+and WORKSET on: the fight performance series (PRs #26-#31), the
+animated-scenery restore fix, tank shell sounds, the M10RUN.LOG copy
+of everything the program prints (PRs #34-#36), and the base/barracks
+flicker fix (PR #39: each page redraws its scenery when the camera is
+not where that page last drew it).  Full checklist:
 "PCjr hardware test checklist: fight performance series" (claude.ai doc).
 
 Files
-  M10.EXE    the game, be018bb build.  Self-contained.
+  M10.EXE    the game, d9b5c11 build.  Self-contained.
   M10OLD.EXE the 2026-10-28 build (PR #24), for the before/after fight.
   PAD.BAT    pad benchmark:  M10 /ztimer /batch /frames=60 > M10-05.LOG
              PAD OTHER.LOG  writes a different log name.
