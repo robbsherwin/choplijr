@@ -1,11 +1,12 @@
-Choplifter! PCjr -- M10 test build, 2026-10-30
-Built from main at f3e43fa (PRs #26-#31, FIGHT_PERFORMANCE.md) with Open
-Watcom V2, -0 -ms -ot, DEBUG_KEYS and WORKSET on.  Nothing in this series
-has run on real hardware yet.  Full checklist: "PCjr hardware test
-checklist: fight performance series" (claude.ai doc).
+Choplifter! PCjr -- M10 test build, 2026-10-30 (evening)
+Built from main at be018bb with Open Watcom V2, -0 -ms -ot, DEBUG_KEYS
+and WORKSET on: the fight performance series (PRs #26-#31) plus the
+animated-scenery restore fix, tank shell sounds and the M10RUN.LOG copy
+of everything the program prints (PRs #34-#36).  Full checklist:
+"PCjr hardware test checklist: fight performance series" (claude.ai doc).
 
 Files
-  M10.EXE    the game, 2026-10-30 build.  Self-contained.
+  M10.EXE    the game, be018bb build.  Self-contained.
   M10OLD.EXE the 2026-10-28 build (PR #24), for the before/after fight.
   PAD.BAT    pad benchmark:  M10 /ztimer /batch /frames=60 > M10-05.LOG
              PAD OTHER.LOG  writes a different log name.
