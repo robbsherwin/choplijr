@@ -281,9 +281,12 @@ static unsigned long    ws_z_restore, ws_z_blit, ws_z_video;
 #define SCENERY_TOP_ROW (199U - FLAGPOLE_Y)
 #define BOUNDS_TOP      112U
 #define LAND_POSY       25U
-/* Tread bottom = LAND_POSY + GROUND - this.  8 sat them on the
- * highlight; 13 is two rows under the first "a little high" nudge. */
-#define TANK_GROUND_BIAS 13U
+/* Tread bottom row = world_to_sy(GROUND): the same row a destroyed tank's
+ * explosion (an entity at Y = 0 on the tank's GROUND plane) lands on, so
+ * the wreck appears where the tank stood.  The tanks had been nudged up
+ * toward the hostages' line (LAND_POSY + GROUND - 13); that was judged
+ * wrong on hardware once the fight ran at speed, and the explosion spot
+ * is the reference the player sees. */
 /* One shell in the air at a time (Atari 8-bit feel: ~2 shots/s).  After
  * impact the boom plays, then a beat, then the next shot.  Four shots
  * make a volley; then 2 s at 20 Hz before another.  Apple was one shot
@@ -4899,11 +4902,10 @@ static void draw_ents(unsigned seg, dirty_list *list)
             unsigned th;
             unsigned wy;
 
-            /* Chopper skids live at LAND_POSY; tanks were Y+GROUND in Apple
-             * space (~11-18) and sat in the brown under the bombs.  Plane
-             * 5-12 is a few pixels of field depth; BIAS keeps treads in
-             * the dirt under the highlight rather than on it. */
-            wy = (unsigned)LAND_POSY + (unsigned)e->ground - TANK_GROUND_BIAS;
+            /* Treads sit on the tank's GROUND plane (5-12 rows of field
+             * depth, bottom rows 187-194): where its explosion lands when
+             * it dies, see the note at BOUNDS_TOP/LAND_POSY. */
+            wy = (unsigned)e->ground;
             th = (unsigned)tank_tread_m9[0][1];
             if (th == 0U)
                 th = 1U;
