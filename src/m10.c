@@ -512,6 +512,15 @@ static unsigned char    base_runners;
 static unsigned char    house_states[N_HOUSES];
 static unsigned char    hostages_in_houses[N_HOUSES];
 static unsigned char    scenery_full[2];
+/* scroll_x at which each page's scenery was last fully drawn.  A page is
+ * due a full scenery redraw when the camera is anywhere else, not only on
+ * the tick the camera moved: with two alternating pages, the tick the
+ * camera stops is drawn on one page, and the other page still shows the
+ * scenery one step back -- "scrolled" (this tick's change) never told it
+ * so.  The two pages then alternate between two positions: the flickering
+ * houses, fence and base seen on hardware.  The old every-4-ticks whole-
+ * scenery restore (removed with FIXES.md 1.2) had hidden it. */
+static unsigned         scenery_scroll[2];
 static unsigned char    last_flag_bit[2];
 static unsigned char    last_fire_bit[2];
 /* Sprite dirty lists, plus last full scenery footprints (scroll restore).
@@ -1696,6 +1705,7 @@ static void scenery_invalidate(void)
 {
     scenery_full[0] = 1;
     scenery_full[1] = 1;
+    scenery_scroll[0] = scenery_scroll[1] = 0xFFFFU;
 }
 
 /* Apple renderStars / renderMoon: compiled HGR dots in the night sky, plus
@@ -6326,7 +6336,9 @@ static void run_viewer(void)
                 sbbp = &sbb;
             }
 
-            full_sc = scrolled || scenery_full[back];
+            /* Compare with what THIS page last drew, not with the previous
+             * tick (that was the other page); see scenery_scroll. */
+            full_sc = scenery_full[back] || scroll_x != scenery_scroll[back];
             if (full_sc) {
                 restore_list(back_seg, &scenery_mark[back]);
                 restore_list(back_seg, &anim_mark[back]);
@@ -6385,6 +6397,7 @@ static void run_viewer(void)
                 draw_scenery(back_seg, sim_frame, &scenery_mark[back], 1,
                              0, 0U, 0, (unsigned)back);
                 scenery_full[back] = 0;
+                scenery_scroll[back] = scroll_x;
             } else {
                 /* full=0: only what hit-tests dirty or changed animation
                  * frame (fire_changed / flag_changed) is drawn.
