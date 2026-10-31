@@ -120,8 +120,6 @@ extern unsigned char  base_flagpole_e[];
 extern unsigned char  base_flagpole_o[];
 extern unsigned char  base_flag_00_e[];
 extern unsigned char  base_flag_00_o[];
-extern unsigned char  base_flag_01_e[];
-extern unsigned char  base_flag_01_o[];
 extern unsigned char  moon_e[];
 extern unsigned char  moon_o[];
 
@@ -521,7 +519,6 @@ static unsigned char    scenery_full[2];
  * houses, fence and base seen on hardware.  The old every-4-ticks whole-
  * scenery restore (removed with FIXES.md 1.2) had hidden it. */
 static unsigned         scenery_scroll[2];
-static unsigned char    last_flag_bit[2];
 static unsigned char    last_fire_bit[2];
 /* Sprite dirty lists, plus last full scenery footprints (scroll restore).
  * Defined here rather than next to run_viewer() because next_sortie()
@@ -541,13 +538,10 @@ static dirty_list        scenery_mark[2] = {
  * scenery_mark means that restore touches nothing else: the intact
  * houses, fence and base stay put.  One rect per burning house per
  * visit, plus a visit's worth of duplicates between flips. */
-/* ... and the base flag, whose two frames also differ in outline (one
- * frame's pixels survive under the other).  Before FIXES.md 1.2 the fire
- * flip restored the whole scenery list, which cleaned the flag up as a
- * side effect; once only the flames were restored the flag kept both
- * frames' pixels, seen on hardware as a flickering base.  Everything
- * animated in the scenery goes here, and the list is restored whenever
- * either animation changes frame on this page. */
+/* The base flag used to live here too, until it stopped waving (it is a
+ * single still frame now, see draw_base); the flames are the only animated
+ * scenery left.  Anything that animates in the scenery belongs in this
+ * list, restored whenever its frame changes on this page. */
 #define ANIM_MAX        16
 static dirty_rect        anim_r[2][ANIM_MAX];
 static dirty_list        anim_mark[2] = {
@@ -5508,7 +5502,6 @@ static void next_sortie(void)
                                      * dirty list happens to hit would
                                      * redraw, leaving the rest as bare
                                      * ground. */
-    last_flag_bit[0] = last_flag_bit[1] = 0xFF;
     last_fire_bit[0] = last_fire_bit[1] = 0xFF;
     reset_star_tracking();
     /* paint_world above just wiped the HUD band to plain green (no
@@ -5747,14 +5740,12 @@ static int pad_hits_dirty(const dirty_rect *hit, unsigned nhit,
  * fire_changed redraw of all of them every 4 ticks; the flames now live in
  * anim_mark, so nothing here is ever erased by a flip and the only
  * animation this needs to track is the flag's own. */
-static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
-                      dirty_list *alist, int full, const dirty_rect *hit,
-                      unsigned nhit, const dirty_bbox *bb, unsigned pg)
+static void draw_base(unsigned seg, dirty_list *list, int full,
+                      const dirty_rect *hit, unsigned nhit,
+                      const dirty_bbox *bb)
 {
     unsigned bx = BASE_X + 0x49U;
     unsigned px = BASE_X + 0x71U;
-    unsigned char flag_bit, flag_changed;
-    unsigned char *flag;
 
     if (full || pad_hits_dirty(hit, nhit, bb))
         draw_pad(seg, list);
@@ -5764,32 +5755,21 @@ static void draw_base(unsigned seg, unsigned frame, dirty_list *list,
                           base_building_e, hit, nhit, bb))
         blit_world(seg, bx, BASE_BUILD_Y, base_building_e, base_building_o,
                    list);
-    /* The flag's tracked rect is a whole byte wider than the flag and
-     * takes the pole's column with it, so a flag-frame restore erases the
-     * pole too: redraw the pole whenever the flag changes. */
-    flag_bit = (unsigned char)((frame / 8U) & 1U);
-    flag_changed = (unsigned char)(flag_bit != last_flag_bit[pg]);
-    last_flag_bit[pg] = flag_bit;
-    if (full || flag_changed
+    if (full
         || spr_hits_dirty(world_to_sx(px), world_to_sy(FLAGPOLE_Y),
                           base_flagpole_e, hit, nhit, bb))
         blit_world(seg, px, FLAGPOLE_Y, base_flagpole_e, base_flagpole_o,
                    list);
 
-    /* The flag goes into alist (anim_mark), not the scenery list: run_viewer
-     * restores that list when the flag bit flips for this page, so the
-     * other frame's pixels are gone before this one is drawn. */
-    flag = flag_bit ? base_flag_01_e : base_flag_00_e;
-    if (full || flag_changed
+    /* The flag no longer waves: its two frames differ in outline, so the
+     * two-page restore-and-redraw cycle showed it appearing and
+     * disappearing on hardware even once the frames were tracked.  A
+     * still red flag was judged fine.  base_flag_01_e is now unused. */
+    if (full
         || spr_hits_dirty(world_to_sx(px + 2U), world_to_sy(FLAGPOLE_Y),
-                          flag, hit, nhit, bb)) {
-        if (flag_bit)
-            blit_world(seg, px + 2U, FLAGPOLE_Y, base_flag_01_e,
-                       base_flag_01_o, alist);
-        else
-            blit_world(seg, px + 2U, FLAGPOLE_Y, base_flag_00_e,
-                       base_flag_00_o, alist);
-    }
+                          base_flag_00_e, hit, nhit, bb))
+        blit_world(seg, px + 2U, FLAGPOLE_Y, base_flag_00_e, base_flag_00_o,
+                   list);
 }
 
 /* Mountains are handled by the caller.  list is the scenery mark (full
@@ -5812,7 +5792,7 @@ static void draw_scenery(unsigned seg, unsigned frame, dirty_list *list,
     draw_houses(seg, list, &anim_mark[pg], full, hit, nhit, bbp, fire_bit,
                 fire_changed);
     draw_fence(seg, list, full, hit, nhit, bbp);
-    draw_base(seg, frame, list, &anim_mark[pg], full, hit, nhit, bbp, pg);
+    draw_base(seg, list, full, hit, nhit, bbp);
     ws_kind = WS_K_SPRITE;
 }
 
@@ -6183,7 +6163,6 @@ static void run_viewer(void)
     anim_mark[0].n = 0;
     anim_mark[1].n = 0;
     scenery_invalidate();
-    last_flag_bit[0] = last_flag_bit[1] = 0xFF;
     last_fire_bit[0] = last_fire_bit[1] = 0xFF;
     reset_star_tracking();
     hud_pg_mode[0] = hud_pg_mode[1] = 0;
@@ -6357,13 +6336,10 @@ static void run_viewer(void)
                  * actually on this page" gate: an off-screen flame never
                  * gets a rect, so a far-away fire costs nothing here. */
                 unsigned char fb = (unsigned char)((sim_frame / 4U) & 1U);
-                unsigned char lb = (unsigned char)((sim_frame / 8U) & 1U);
 
-                /* Same test draw_scenery/draw_base make a moment later
-                 * (fire_changed / flag_changed), before they update the
-                 * per-page last_*_bit.  The flag's frames differ in
-                 * outline just as the flames' do. */
-                if (fb != last_fire_bit[back] || lb != last_flag_bit[back])
+                /* Same test draw_scenery makes a moment later
+                 * (fire_changed), before it updates last_fire_bit. */
+                if (fb != last_fire_bit[back])
                     restore_list(back_seg, &anim_mark[back]);
             }
 
