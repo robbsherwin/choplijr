@@ -6447,6 +6447,7 @@ static void run_viewer(void)
 
             draw_hud(back_seg, back);
             WS_END_TICK(scrolled);
+            (void)scrolled;             /* only the WORKSET build reads it */
 
             if (opt_phases) {
                 tp0 = bios_ticks();
