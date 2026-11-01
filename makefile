@@ -96,14 +96,31 @@ M10     = $(BUILD)\m10.exe
 #        cap) -- re-check the .map file's DGROUP size after touching this.
 # -w4    warnings on.  Worth reading: this code cannot be run on the machine
 #        it was written on, so the compiler is the only reviewer available.
-# -dDEBUG_KEYS  keep the in-play debug keys (P = teleport to the first
-#        barracks).  Remove it for a release build; the F1/` debug HUD and
-#        the /force* switches stay either way, they are harmless to a
-#        player who does not ask for them.
-# -dWORKSET     keep the WORKSET byte counters (restore/blit bytes per
-#        present, printed after a flight).  The pad benchmark depends on
-#        them; a build without it skips their per-blit cost.
-CFLAGS  = -0 -ms -ot -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND) -dDEBUG_KEYS -dWORKSET
+# Development builds (the default) carry two extras a player never asked
+# for:
+#
+# -dDEBUG_KEYS  the in-play debug keys (P = teleport to the first barracks)
+#        and the /debug=N test rigs.
+# -dWORKSET     the WORKSET byte counters (restore/blit bytes per present,
+#        printed after a flight).  The pad benchmark depends on them; a
+#        build without them skips their per-blit cost.
+#
+# A release build drops both:
+#
+#   wmake clean
+#   wmake RELEASE=1
+#
+# Clean first, as with GROUND: nothing in the dependency graph knows the
+# flags changed.  The F1/` debug HUD and the /force* switches stay in every
+# build; they are harmless to a player who does not ask for them.  The
+# version printed on the title and in the report is CHOPLIJR_VERSION in
+# src/m10.c.
+!ifdef RELEASE
+DEVFLAGS =
+!else
+DEVFLAGS = -dDEBUG_KEYS -dWORKSET
+!endif
+CFLAGS  = -0 -ms -ot -bt=dos -zq -w4 -i=$(SRC) -dGROUND_COLOUR=GROUND_$(GROUND) $(DEVFLAGS)
 
 # -f obj is the OMF object format wlink reads directly (DESIGN.md section 12).
 # Listings are kept because the assembly here has to be verified by reading,

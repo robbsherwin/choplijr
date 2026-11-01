@@ -56,6 +56,10 @@
  * DGROUP and has little to spare (CLAUDE-THOUGHTS.md).  Opened first thing
  * in main(), closed in cleanup(); if it cannot be opened the screen output
  * is unaffected. */
+/* Printed on the title screen and at the top of the report; tagged in git
+ * as the same string. */
+#define CHOPLIJR_VERSION "0.90.0"
+
 #define RUN_LOG_NAME    "M10RUN.LOG"
 static FILE *run_log;
 
@@ -166,10 +170,12 @@ extern unsigned char  title_the_end[];
 extern unsigned char  title_crown[];
 extern unsigned char *sortie_banner_e[3];
 
+#ifdef DEBUG_KEYS
 static unsigned opt_debug       = 0;        /* /debug=N; N reserved, only
                                               * 1 defined so far (near-end-
                                               * game / max-difficulty rig,
                                               * see apply_debug_state) */
+#endif
 static int      opt_bios_flip   = 0;
 static int      opt_wait        = 1;
 static int      opt_force       = 0;
@@ -721,7 +727,8 @@ static void draw_title(void)
     text_clear();
     text_hide_cursor();
     text_puts_center(TITLE_ROW_NAME, "CHOPLIFTER!", ATTR_WHITE);
-    text_puts_center(TITLE_ROW_SUB, "for IBM PCjr", ATTR_WHITE);
+    text_puts_center(TITLE_ROW_SUB, "for IBM PCjr  v" CHOPLIJR_VERSION,
+                     ATTR_WHITE);
 
     joy_j = play_keyboard ? ATTR_WHITE : ATTR_CYAN;
     kbd_k = play_keyboard ? ATTR_CYAN : ATTR_WHITE;
@@ -5056,6 +5063,7 @@ static void spawn_one_in_field(int house)
  * level 2 is already "adds saucers", the last tier), so 3 is the highest
  * this can be set to; there is no separate "how many drop-offs" counter
  * past that cap to set to 5. */
+#ifdef DEBUG_KEYS
 static void apply_debug_state(void)
 {
     int i;
@@ -5088,6 +5096,7 @@ static void apply_debug_state(void)
                                            * (house 0) barracks */
     hostage_act[MAX_HOSTAGES - 1] = 0xFF; /* running toward house 0 */
 }
+#endif /* DEBUG_KEYS */
 
 static void spawn_unload(void)
 {
@@ -6171,8 +6180,10 @@ static void run_viewer(void)
     scroll_x = SCROLL_START;
     init_helicopter();
     init_hostages();
+#ifdef DEBUG_KEYS
     if (opt_debug == 1U)
         apply_debug_state();
+#endif
     banner_left = BANNER_TICKS;
     hud_prev_tog = 0;
 #ifdef DEBUG_KEYS
@@ -6514,7 +6525,9 @@ static void usage(void)
 "  /frames=N    retraces then exit. 0 (default, attended) means until Esc.\n"
 "               /batch with no /frames uses 1800 retraces.\n"
 "  /pa=N /pb=N  force two page numbers in 1-7\n"
+#ifdef DEBUG_KEYS
 "  /debug=1     rig a near-endgame max-difficulty test start (m10.c)\n"
+#endif
 "  /force       run even if the BIOS model byte is not a PCjr's\n"
 "  /ztimer      Zen-timer one present at sim_frame 4 (pad, dirty list live)\n"
 "  /ztimer=N    same, at sim_frame N.  Interrupts off; do not touch keys.\n"
@@ -6582,8 +6595,11 @@ static int parse_args(int argc, char **argv)
         else if (strncmp(a, "frames=", 7) == 0) {
             opt_frames = (unsigned)atoi(a + 7);
             saw_frames = 1;
-        } else if (strncmp(a, "debug=", 6) == 0)
+        }
+#ifdef DEBUG_KEYS
+        else if (strncmp(a, "debug=", 6) == 0)
             opt_debug = (unsigned)atoi(a + 6);
+#endif
         else if (strncmp(a, "pa=", 3) == 0)
             opt_page_a = atoi(a + 3);
         else if (strncmp(a, "pb=", 3) == 0)
@@ -6828,7 +6844,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    printf("Choplifter! PCjr -- M10 polish\n");
+    printf("Choplifter! PCjr -- v" CHOPLIJR_VERSION "\n");
     printf("hardware validation (workset bytes, /ztimer)  ground %s\n\n",
            GROUND_COLOUR_NAME);
 
