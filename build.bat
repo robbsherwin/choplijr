@@ -1,13 +1,13 @@
 @echo off
 rem ---------------------------------------------------------------------------
-rem  Choplifter! for the IBM PCjr -- M1 build, without wmake.
+rem  Choplifter! for the IBM PCjr -- M10 build, without wmake.
 rem
 rem  The makefile is the real build.  This exists because wmake, NASM and
 rem  wlink can each be missing independently, and when something does not work
 rem  it is useful to have a version that runs the three commands in the open
 rem  where you can see exactly what was invoked and what it said.
 rem
-rem  Usage:  build            build build\m1.exe
+rem  Usage:  build            build build\m10.exe
 rem          build clean      delete build products
 rem
 rem  Tool paths come from setenv.bat, which this script calls if the caller
@@ -15,7 +15,9 @@ rem  has not already set WATCOM.  CC, NASM and LINKER can each be overridden
 rem  in the environment first.
 rem
 rem  GROUND=BROWN or GROUND=PINK selects the ground colour (DESIGN.md
-rem  section 5); run `build clean` when changing it.
+rem  section 5); RELEASE=1 drops DEBUG_KEYS and WORKSET, as `wmake
+rem  RELEASE=1` does.  This script always rebuilds everything, so no clean
+rem  is needed when changing either.  Compiler flags match the makefile.
 rem ---------------------------------------------------------------------------
 
 setlocal
@@ -42,6 +44,7 @@ if /i not "%GROUND%"=="BROWN" if /i not "%GROUND%"=="PINK" (
   echo ERROR: GROUND must be BROWN or PINK, not "%GROUND%".
   goto fail
 )
+if "%RELEASE%"=="" (set DEVFLAGS=-dDEBUG_KEYS -dWORKSET) else (set DEVFLAGS=)
 
 rem -- tool check, so a missing tool is reported rather than half a build -----
 where %CC% >nul 2>nul
@@ -51,6 +54,8 @@ if errorlevel 1 (
   echo        CC to its full path.
   goto fail
 )
+rem  setenv.bat gives NASM as a full path, which `where` cannot look up.
+if exist "%NASM%" goto nasm_ok
 where %NASM% >nul 2>nul
 if errorlevel 1 (
   echo ERROR: NASM "%NASM%" is not on the PATH.
@@ -58,6 +63,7 @@ if errorlevel 1 (
   echo          set NASM=%%LOCALAPPDATA%%\bin\NASM\nasm.exe
   goto fail
 )
+:nasm_ok
 where %LINKER% >nul 2>nul
 if errorlevel 1 (
   echo ERROR: Open Watcom's linker "%LINKER%" is not on the PATH.
@@ -67,27 +73,30 @@ if errorlevel 1 (
 if not exist build mkdir build
 
 rem -- C: 8086 code generation, small model, DOS target ----------------------
-echo [cc ]  src\m1.c    (ground colour %GROUND%)
-%CC% -0 -ms -os -bt=dos -zq -w4 -i=src -dGROUND_COLOUR=GROUND_%GROUND% ^
-  -fo=build\m1.obj src\m1.c
-if errorlevel 1 goto fail
+echo [cc ]  ground colour %GROUND%, flags: %DEVFLAGS%
+for %%F in (m10 snd sprdata_rle sprdata_world sprdata_host sprdata_combat sprdata_title sprdata_moon sprdata_tank) do (
+  echo [cc ]  src\%%F.c
+  %CC% -0 -ms -ot -bt=dos -zq -w4 -i=src -dGROUND_COLOUR=GROUND_%GROUND% %DEVFLAGS% ^
+    -fo=build\%%F.obj src\%%F.c
+  if errorlevel 1 goto fail
+)
 
 rem -- NASM: OMF objects that wlink reads directly ---------------------------
-for %%F in (pztimer pcjrvid prims dosmem) do (
+for %%F in (pcjrvid prims dosmem blit stick pztimer) do (
   echo [asm]  src\asm\%%F.asm
   %NASM% -f obj -l build\%%F.lst -o build\%%F.obj src\asm\%%F.asm
   if errorlevel 1 goto fail
 )
 
-echo [link] build\m1.exe
-%LINKER% system dos name build\m1.exe option quiet option stack=8192 ^
-  option map=build\m1.map ^
-  file { build\m1.obj build\pztimer.obj build\pcjrvid.obj build\prims.obj build\dosmem.obj }
+echo [link] build\m10.exe
+%LINKER% system dos name build\m10.exe option quiet option stack=8192 ^
+  option map=build\m10.map ^
+  file { build\m10.obj build\snd.obj build\sprdata_rle.obj build\sprdata_world.obj build\sprdata_host.obj build\sprdata_combat.obj build\sprdata_title.obj build\sprdata_moon.obj build\sprdata_tank.obj build\pcjrvid.obj build\prims.obj build\dosmem.obj build\blit.obj build\stick.obj build\pztimer.obj }
 if errorlevel 1 goto fail
 
 echo.
-echo Built build\m1.exe
-dir /b build\m1.exe
+echo Built build\m10.exe
+dir /b build\m10.exe
 endlocal
 exit /b 0
 

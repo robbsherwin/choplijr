@@ -4290,7 +4290,8 @@ static int fire_tank_shell(int ti)
     s->vy = 3;
     s->dir = (signed char)shell_launch_dir[ang];
     /* A short, low, quiet blip (SND_TANK_FIRE, snd.c); off-screen tanks
-     * stay silent, which is what made the old SND_SHELL jarring. */
+     * stay silent.  The loud white-noise shell M8/M9 played for every
+     * tank, on screen or not, was what made the old sound jarring. */
     if (tank_on_screen(t))
         snd_play(SND_TANK_FIRE);
     return si;
@@ -5774,7 +5775,8 @@ static void draw_base(unsigned seg, dirty_list *list, int full,
     /* The flag no longer waves: its two frames differ in outline, so the
      * two-page restore-and-redraw cycle showed it appearing and
      * disappearing on hardware even once the frames were tracked.  A
-     * still red flag was judged fine.  base_flag_01_e is now unused. */
+     * still red flag was judged fine; the second frame is no longer
+     * generated. */
     if (full
         || spr_hits_dirty(world_to_sx(px + 2U), world_to_sy(FLAGPOLE_Y),
                           base_flag_00_e, hit, nhit, bb))

@@ -12,7 +12,8 @@
 #define SND_H
 
 #define SND_FIRE        1
-#define SND_SHELL       2
+/* 2 was SND_SHELL, the loud white-noise tank shell M8/M9 played; M10
+ * uses SND_TANK_FIRE / SND_TANK_HIT instead.  Left unassigned. */
 #define SND_MISSILE     3
 #define SND_BOARD       4
 #define SND_RESCUE      5

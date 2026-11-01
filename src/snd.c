@@ -91,11 +91,6 @@ static const unsigned char pat_alien[] = {
 };
 /* Noise patterns: {ctrl, unused, atten, ticks}; ticks==0 ends.
  * ctrl is the 4-bit noise latch nibble (FB + NF). */
-static const unsigned char pat_shell[] = {
-    0x06, 0x00, 0x00, 2,        /* white /2048 */
-    0x06, 0x00, 0x08, 2,
-    0, 0, 0, 0
-};
 static const unsigned char pat_missile[] = {
     0x04, 0x00, 0x00, 2,        /* white /512 */
     0x04, 0x00, 0x06, 2,
@@ -423,9 +418,6 @@ void snd_play(unsigned char id)
         break;
     case SND_TANK_HIT:
         play_noise_pat_free(id, pat_tank_hit);
-        break;
-    case SND_SHELL:
-        play_noise_pat(id, pat_shell);
         break;
     case SND_MISSILE:
         play_noise_pat(id, pat_missile);

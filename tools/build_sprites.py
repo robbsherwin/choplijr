@@ -108,8 +108,9 @@ SCENERY = (
     ("houseSill",          15,  "house_sill"),
     ("baseBuilding",        7,  "base_building"),
     ("baseFlagpole",       15,  "base_flagpole"),
+    # One still flag frame.  The Apple's second frame (baseFlag_01) is not
+    # converted: waving made the flag blink on hardware (PR #42).
     ("baseFlag_00",         4,  "base_flag_00"),
-    ("baseFlag_01",         4,  "base_flag_01"),
     ("fenceTowerSprite4",   7,  "fence_4"),
     ("fenceTowerSprite3",   7,  "fence_3"),
     ("fenceTowerSprite2",   7,  "fence_2"),
@@ -815,7 +816,7 @@ def main():
  * change the converter and re-run it.
  *
  * Mountains (4-row ridge, index 8), intact barracks + sill, base building,
- * flagpole, two flag frames, five fence towers.  Even/odd pre-shifts.
+ * flagpole, one still flag frame, five fence towers.  Even/odd pre-shifts.
  * Index 0 transparent.  HGR checkerboard flattened to flat colour.
  * Linked only into m4.exe.
  */

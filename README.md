@@ -46,13 +46,14 @@ hardware. Paths for this machine are in `setenv.bat` / `setenv.ps1`. See
 and what the numbers do and do not prove.
 
 ```
-wmake            build build\m1.exe through build\m10.exe
-wmake run        launch M1 in DOSBox-X as a 128 KB PCjr (attended; do not start this until someone is watching)
-wmake run-batch  128 KB, /batch /nogfx, captured to build\M1.LOG
+wmake            build build\m10.exe (development build: DEBUG_KEYS, WORKSET)
+wmake RELEASE=1  release build (run wmake clean first)
 wmake clean
 ```
 
-M2 through M10 are compile-only visuals until someone is watching. `build\m2.exe`
+Only M10, the game, is built now. M1 through M9 were steps toward it and
+are no longer built (2026-11-01); their sources stay in `src\` and their
+write-ups in `docs\` as history. What each one was: `build\m2.exe`
 is packed `blit_mask` of the flying set. `build\m3.exe` is the sprite engine:
 `blit_rle` plus per-buffer dirty lists, same bounce and pose cycle. `build\m4.exe`
 is the scrolling world (camera lead, mountains, barracks, base, fence).
