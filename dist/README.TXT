@@ -1,7 +1,8 @@
 Choplifter! PCjr -- M10 test build 20261101-01, version 0.90.0
 M10.EXE built 2026-11-01 on branch 20261101-01: main at 62efb4d plus
-the removal of the stale root m10.exe and the M10-only makefile (no
-game source changes beyond main).  Same flags as before: -0 -ms -ot,
+the removal of the stale root m10.exe, the M10-only makefile, and the
+removal of code only M4-M9 used (the second flag frame and the old
+SND_SHELL sound; M10 played neither).  Same flags as before: -0 -ms -ot,
 DEBUG_KEYS and WORKSET on, so PAD.BAT and the P teleport still work.
 
 New since the d9b5c11 cut -- check these by eye:
