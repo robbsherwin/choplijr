@@ -332,7 +332,8 @@ static unsigned long    ws_z_restore, ws_z_blit, ws_z_video;
  * showed chopper wreckage for two frames (FIXES.md 1.7). */
 #define ET_WRECK        12
 #define ALIEN_SHOT_PX       4U    /* screen px, both directions */
-#define ALIEN_SHOT_C_LIGHT  12    /* light red: fresh shot */
+#define ALIEN_SHOT_C_LIGHT  12    /* fresh shot: a cycled fire register,
+                                   * so it glows (fire_cycle) */
 #define ALIEN_SHOT_C_DARK   4     /* dark red: past ALIEN_SHOT_FADE_GROUND */
 /* e->ground - chop_ground grows by e->dir (3, ent_basic_phys) every tick
  * this shot is alive, so it is already a free "ticks since spawn" signal
@@ -356,8 +357,6 @@ static unsigned long    ws_z_restore, ws_z_blit, ws_z_video;
  * CGA brown that reads orange on a CRT (same register as the ground). */
 #define SHELL_PX        2U
 #define SHELL_WORLD_W   (SHELL_PX * 2U)
-#define SHELL_C_GREY    7
-#define SHELL_C_ORANGE  6
 #define CHOP_HIT_W      18U             /* screen px; 2 world px each */
 #define CHOP_HIT_H      18U
 #define CHOP_WORLD_W    (CHOP_HIT_W * 2U)
@@ -615,14 +614,25 @@ static unsigned char    pend_a, pend_s, pend_d;
 
 static const unsigned char fence_world_y[5] = { 17, 22, 25, 27, 28 };
 
-/*  0 black, 1 blue, 2 green (tank treads, turret shadow), 3 cyan (jet
- *  shadow), 4 red (fire), 5 -> light cyan (jet body), 6 ground, 7 light
- *  grey (chopper shadow, mountains).  Chopper body is pixel 15 (white). */
+/*  0 black, 1 blue, 2 green (tank treads, turret shadow), 3 and 12 the
+ *  cycled fire registers (explosions, barracks flames, saucer shot; see
+ *  bake_palette_roles and fire_cycle), 4 red (blood, old saucer shot), 5 ->
+ *  light cyan (jet body), 6 ground, 7 light grey (chopper shadow, base
+ *  concrete), 8 dark grey (ridge band, jet shadow).  Chopper body is pixel
+ *  15 (white).  3 and 12 hold their rest colours here for the title and
+ *  logo screens; run_viewer takes them over. */
 static const unsigned char m4_palette[16] = {
-     0, 1, 2, 3, 4, 11,
+     0, 1, 2, 14, 4, 11,
     GROUND_COLOUR,
-     7, 8, 9, 10, 11, 12, 13, 14, 15
+     7, 8, 9, 10, 11, 4, 13, 14, 15
 };
+
+/* Fire cycle for registers 3 and 12 (DESIGN.md section 5).  Three steps,
+ * the two registers one step apart, so the pair is never the same colour:
+ * (yellow, red) -> (light red, yellow) -> (red, light red).  Advanced with
+ * rotor_phase, every other sim tick (10 Hz); two palette writes in the
+ * retrace, no pixel is redrawn. */
+static const unsigned char fire_cycle[3] = { 14, 12, 4 };
 
 #define JR_DEV_NAME     "JRCONSYS"
 #define JR_NUL_NAME     "NUL     "
@@ -2247,64 +2257,72 @@ static int xbyte_from_px(int x)
     return (x - 1) / 2;
 }
 
-static unsigned char fire_nibble(unsigned char n, unsigned mix)
+/* Palette roles at startup (DESIGN.md section 5): indices 3 and 12 are the
+ * two cycled registers, rewritten every other sim tick by run_viewer so fire
+ * flickers without a redraw.  The art does not carry colour, so the roles
+ * are applied to the RLE payload once here rather than in the generator
+ * (the CHOPGFX source is not in this checkout):
+ *
+ *   explosions   yellow (14) -> 3/12 checkerboard
+ *   house flames red (4)     -> 3/12 checkerboard
+ *   jets         shadow 3    -> 8 (dark grey): index 3 had to be freed
+ *
+ * Only run payload bytes change, never a header or a skip/run pair, and no
+ * nibble changes between zero and non-zero, so the RLE structure holds.
+ * A pointer that appears twice in a table is baked once. */
+static void bake_rows(unsigned char *s, unsigned char from_a,
+                      unsigned char from_b, int checker, unsigned char to)
 {
-    static const unsigned char c[3] = { 4, 12, 14 };
+    unsigned rows, r, skip, run, col;
+    unsigned char *p, v, hi, lo;
 
-    if (n != 0x0E)
-        return n;
-    return c[mix % 3U];
-}
-
-/* The yellow-to-fire recolour, with the old blit_fire phase fixed at 1 (the
- * only value it was ever used with).  blit.asm's fire_tab is this function
- * tabulated. */
-static unsigned char fire_byte(unsigned char src)
-{
-    unsigned mix;
-
-    mix = (unsigned)src + 1U;
-    return (unsigned char)((fire_nibble((unsigned char)(src >> 4), mix) << 4) |
-                           fire_nibble((unsigned char)(src & 0x0F), mix + 1U));
-}
-
-/* Recolour the explosion frames once, at startup, instead of on every blit
- * (FIGHT_PERFORMANCE.md item 4).  Explosions and the dying chopper used to
- * go through blit_rle_m8_fire, whose opaque runs are LODSB/XLATB/STOSB/LOOP
- * per byte instead of REP MOVSB, because the recolour was applied at draw
- * time; it is a fixed function of the sprite bytes, so it can be applied
- * to the data once.  Only run payload bytes are touched, never the header
- * or the skip/run pairs, and the recolour never turns a zero nibble
- * non-zero or back, so the RLE structure is unchanged.  Frames that appear
- * twice in the table are baked once (the recolour is not idempotent). */
-static void bake_fire_frames(void)
-{
-    unsigned       f, g, r, rows, skip, run;
-    unsigned char *p;
-
-    for (f = 0; f < 5U; f++) {
-        for (g = 0; g < f; g++)
-            if (explosion_e[g] == explosion_e[f])
+    rows = s[1];
+    p = s + 2;
+    for (r = 0; r < rows; r++) {
+        col = 0;
+        for (;;) {
+            skip = *p++;
+            run  = *p++;
+            if (skip == 0U && run == 0U)
                 break;
-        if (g != f)
-            continue;
-        p = explosion_e[f];
-        rows = p[1];
-        p += 2;
-        for (r = 0; r < rows; r++) {
-            for (;;) {
-                skip = *p++;
-                run  = *p++;
-                if (skip == 0U && run == 0U)
-                    break;
-                while (run != 0U) {
-                    *p = fire_byte(*p);
-                    p++;
-                    run--;
-                }
+            col += skip;
+            while (run != 0U) {
+                v  = *p;
+                hi = (unsigned char)(v >> 4);
+                lo = (unsigned char)(v & 0x0FU);
+                if (hi == from_a || hi == from_b)
+                    hi = checker ? (((col * 2U + r) & 1U) ? 3 : 12) : to;
+                if (lo == from_a || lo == from_b)
+                    lo = checker ? (((col * 2U + 1U + r) & 1U) ? 3 : 12) : to;
+                *p = (unsigned char)((hi << 4) | lo);
+                p++;
+                col++;
+                run--;
             }
         }
     }
+}
+
+static void bake_table(unsigned char **tab, unsigned n, unsigned char from,
+                       int checker, unsigned char to)
+{
+    unsigned f, g;
+
+    for (f = 0; f < n; f++) {
+        for (g = 0; g < f; g++)
+            if (tab[g] == tab[f])
+                break;
+        if (g == f)
+            bake_rows(tab[f], from, from, checker, to);
+    }
+}
+
+static void bake_palette_roles(void)
+{
+    bake_table(explosion_e, 5U, 14, 1, 0);
+    bake_table(house_fire_e, 2U, 4, 1, 0);
+    bake_table(jet_e, 25U, 3, 0, 8);
+    bake_table(jet_fe, 25U, 3, 0, 8);
 }
 
 /* Called once per opaque/mixed byte on the clipped blit fallback's row walk
@@ -4997,7 +5015,7 @@ static void draw_ents(unsigned seg, dirty_list *list)
             if (eh == 0U)
                 eh = 1U;
             sy = world_to_sy((unsigned)e->y + (unsigned)e->ground + eh - 1U);
-            /* Frames are pre-recoloured (bake_fire_frames): plain blit. */
+            /* Frames are pre-recoloured (bake_palette_roles): plain blit. */
             blit_aligned(seg, sx, sy, explosion_e[fi], list);
             if (e->type == ET_WRECK && fi >= 3)
                 blit_aligned(seg, sx, sy, chop_rubble_e, list);
@@ -6454,6 +6472,10 @@ static void run_viewer(void)
             vid_wait_retrace();
             crt_page = back ? page_b : page_a;
             set_pages(crt_page, back ? page_a : page_b);
+            /* Still inside the retrace vid_wait_retrace returned on. */
+            vid_set_palette(3U, fire_cycle[rotor_phase]);
+            vid_set_palette(12U, fire_cycle[rotor_phase == 2U ? 0U
+                                                               : rotor_phase + 1U]);
 
             if (opt_phases) {
                 tp1 = bios_ticks();
@@ -6836,7 +6858,7 @@ int main(int argc, char **argv)
 
     setbuf(stdout, NULL);
     dgroup_seg = data_seg();            /* once, not per blit */
-    bake_fire_frames();
+    bake_palette_roles();
     run_log_open();                     /* before the first printf */
 
     if (!parse_args(argc, argv)) {
