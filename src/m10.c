@@ -5142,8 +5142,7 @@ static void spawn_unload(void)
 static void spawn_hostages(void)
 {
     unsigned char dh;
-    int house, start, best, best_d, dx, adx;
-    unsigned hx;
+    int house, start;
 
     if ((unsigned)base_runners + (unsigned)hostages_active >= 16U)
         return;
@@ -5156,30 +5155,12 @@ static void spawn_hostages(void)
     if (hostages_left == 0U)
         return;
 
-    /* Apple: HOSTAGES_ACTIVE >= 5 skips all field spawns.  The game
-     * starts with 8 already out of house 3, so a barracks you just
-     * ignited never emptied until four of those eight were gone.
-     * Ignite only sets house_states; people still trickle one per 4
-     * ticks.  A burning house on this screen releases even if the
-     * starting eight are still in the field.  House 3 keeps the 5-cap
-     * so the opening group does not immediately double. */
-    best = -1;
-    best_d = 32767;
-    for (house = 0; house < (int)N_HOUSES; house++) {
-        if (house_states[house] == 0U || hostages_in_houses[house] == 0U)
-            continue;
-        hx = FARHOUSE_X + (unsigned)house * HOUSE_SPACING;
-        dx = (int)chop_x - (int)hx;
-        adx = (dx < 0) ? -dx : dx;
-        if (adx <= (int)VIEW_WORLD_W && adx < best_d) {
-            best_d = adx;
-            best = house;
-        }
-    }
-    if (best >= 0 && (best < 3 || hostages_active < 5U)) {
-        spawn_one_in_field(best);
-        return;
-    }
+    /* Apple: HOSTAGES_ACTIVE >= 5 skips all field spawns, so a barracks
+     * you just ignited does not empty until the field has thinned out.
+     * A port-specific exception (release from a burning house on screen
+     * regardless of the cap) lived here for a while; the original's
+     * behaviour is what is wanted, so the cap applies to every spawn
+     * again (spawnNewHostage, choplifter.s). */
     if (hostages_active >= 5U)
         return;
 
@@ -6497,11 +6478,14 @@ static void run_viewer(void)
                                   / PIT_PER_RETRACE);
                 if (used < 1U)
                     used = 1U;
-                if (used > SIM_DIV)
-                    used = SIM_DIV;
             }
-            idle_left = SIM_DIV - used;
+            /* i counts the retraces really consumed (so /frames and the
+             * printed total mean what they say); the idle budget is what
+             * is left of SIM_DIV, never negative. */
             i += used - 1U;             /* the loop's i++ adds the last */
+            if (used > SIM_DIV)
+                used = SIM_DIV;
+            idle_left = SIM_DIV - used;
         } else {
             unsigned long ti0;
 
